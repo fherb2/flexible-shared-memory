@@ -1,0 +1,44 @@
+[tool.poetry]
+name = "flexible-shared-memory"
+version = "0.1.0"
+description = "High-performance lock-free shared memory for inter-process communication with automatic type mapping"
+authors = ["fherb2 <fherb2@gitlab.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://gitlab.com/fherb2/flexible-shared-memory"
+repository = "https://gitlab.com/fherb2/flexible-shared-memory"
+keywords = ["shared-memory", "ipc", "multiprocessing", "lock-free", "numpy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Hardware",
+]
+packages = [
+    { include = "flexible_shared_memory", from = "source" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+numpy = ">=1.26,<3.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0"
+pytest-cov = "^4.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
