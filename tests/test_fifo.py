@@ -56,7 +56,7 @@ class TestFIFOBasics:
     
     def test_create_fifo(self, unique_name, cleanup_list):
         """Test creating FIFO with multiple slots."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         assert fifo.is_fifo
@@ -64,7 +64,7 @@ class TestFIFOBasics:
     
     def test_write_and_finalize(self, unique_name, cleanup_list):
         """Test basic write and finalize."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         fifo.write(value=1.0, count=1)
@@ -77,7 +77,7 @@ class TestFIFOBasics:
     
     def test_finalize_required(self, unique_name, cleanup_list):
         """Test that data is not visible without finalize."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         fifo.write(value=1.0)
@@ -88,7 +88,7 @@ class TestFIFOBasics:
     
     def test_multiple_writes_before_finalize(self, unique_name, cleanup_list):
         """Test staging multiple writes before finalize."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         # Stage multiple writes
@@ -108,7 +108,7 @@ class TestFIFOOrdering:
     
     def test_read_in_order(self, unique_name, cleanup_list):
         """Test reading data in FIFO order."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         # Write 3 items
@@ -125,7 +125,7 @@ class TestFIFOOrdering:
     
     def test_read_latest_skips_old(self, unique_name, cleanup_list):
         """Test that latest=True skips to newest data."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         # Write multiple items
@@ -140,7 +140,7 @@ class TestFIFOOrdering:
     
     def test_read_empty_fifo(self, unique_name, cleanup_list):
         """Test reading from empty FIFO."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         data = fifo.read(timeout=0)
@@ -153,7 +153,7 @@ class TestFIFOOverflow:
     
     def test_overflow_overwrites_oldest(self, unique_name, cleanup_list):
         """Test that FIFO overwrites oldest when full."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=3)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=3, create=True)
         cleanup_list.append(fifo)
         
         # Fill FIFO (3 slots)
@@ -182,7 +182,7 @@ class TestFIFOOverflow:
     
     def test_continuous_overflow(self, unique_name, cleanup_list):
         """Test writing many items with overflow."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=3)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=3, create=True)
         cleanup_list.append(fifo)
         
         # Write 10 items (will overflow multiple times)
@@ -203,7 +203,7 @@ class TestFIFOSlotCounts:
     
     def test_fifo_with_2_slots(self, unique_name, cleanup_list):
         """Test FIFO with minimum practical slots."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=2)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=2, create=True)
         cleanup_list.append(fifo)
         
         fifo.write(value=1.0)
@@ -219,7 +219,7 @@ class TestFIFOSlotCounts:
     
     def test_fifo_with_10_slots(self, unique_name, cleanup_list):
         """Test FIFO with many slots."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=10)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=10, create=True)
         cleanup_list.append(fifo)
         
         # Fill all slots
@@ -240,7 +240,7 @@ class TestFIFOModifiedFlags:
     
     def test_modified_in_new_slot(self, unique_name, cleanup_list):
         """Test that modified is set in each new slot."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         fifo.write(value=1.0, count=1)
@@ -252,7 +252,7 @@ class TestFIFOModifiedFlags:
     
     def test_partial_write_in_fifo(self, unique_name, cleanup_list):
         """Test partial field updates in FIFO."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         # First slot - write both
@@ -280,7 +280,7 @@ class TestFIFOErrors:
     
     def test_finalize_on_single_slot_raises(self, unique_name, cleanup_list):
         """Test that finalize() raises error on single-slot."""
-        shm = SharedMemory(SimpleData, name=unique_name, slots=1)
+        shm = SharedMemory(SimpleData, name=unique_name, slots=1, create=True)
         cleanup_list.append(shm)
         
         shm.write(value=1.0)
@@ -290,7 +290,7 @@ class TestFIFOErrors:
     
     def test_reset_modified_in_fifo_raises(self, unique_name, cleanup_list):
         """Test that reset_modified raises error in FIFO mode."""
-        fifo = SharedMemory(SimpleData, name=unique_name, slots=5)
+        fifo = SharedMemory(SimpleData, name=unique_name, slots=5, create=True)
         cleanup_list.append(fifo)
         
         fifo.write(value=1.0)
@@ -306,7 +306,7 @@ class TestFIFOMixedTypes:
     
     def test_fifo_with_strings(self, unique_name, cleanup_list):
         """Test FIFO with string fields."""
-        fifo = SharedMemory(MixedData, name=unique_name, slots=3)
+        fifo = SharedMemory(MixedData, name=unique_name, slots=3, create=True)
         cleanup_list.append(fifo)
         
         messages = ["first", "second", "third"]
@@ -325,7 +325,7 @@ class TestFIFOMixedTypes:
         class ArrayData:
             data: "float32[5]" = None
         
-        fifo = SharedMemory(ArrayData, name=unique_name, slots=3)
+        fifo = SharedMemory(ArrayData, name=unique_name, slots=3, create=True)
         cleanup_list.append(fifo)
         
         for i in range(3):

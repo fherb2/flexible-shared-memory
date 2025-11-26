@@ -56,7 +56,7 @@ Basic single-slot usage:
 ...     status_msg: "str[32]" = ""
 >>> 
 >>> # Writer process
->>> shm = SharedMemory(SensorData, name="sensors")
+>>> shm = SharedMemory(SensorData, name="sensors", create=True)
 >>> shm.write(temperature=23.5, pressure=1013.25, status_msg="OK")
 >>> data = shm.read(timeout=0)
 >>> 
@@ -106,7 +106,7 @@ FIFO usage with buffering:
 ...     command: "str[16]" = ""
 >>> 
 >>> # Writer process - fast control loop
->>> fifo = SharedMemory(ControllerState, name="ctrl", slots=10)
+>>> fifo = SharedMemory(ControllerState, name="ctrl", slots=10, create=True)
 >>> for i in range(100):
 ...     fifo.write(position=i*0.1, velocity=i*0.05)
 ...     fifo.finalize()  # Make data available atomically
@@ -114,7 +114,7 @@ FIFO usage with buffering:
 >>> fifo.unlink()
 >>> 
 >>> # Reader process - monitoring at lower rate
->>> fifo = SharedMemory(ControllerState, name="ctrl", slots=10, create=False)
+>>> fifo = SharedMemory(ControllerState, name="ctrl", slots=10)
 >>> data = fifo.read(timeout=1.0, latest=False)
 >>> if data.position.modified:
 ...     print(f"New position: {data.position.value}")
@@ -123,7 +123,7 @@ FIFO usage with buffering:
 Reset modified flag for single-reader scenarios:
 
 >>> # Single reader that wants to track changes
->>> shm = SharedMemory(SensorData, name="sensor1", create=False)
+>>> shm = SharedMemory(SensorData, name="sensor1")
 >>> while True:
 ...     data = shm.read(timeout=1.0, reset_modified=True)
 ...     if data.temperature.modified:
@@ -137,7 +137,7 @@ Image/array transfer:
 ...     timestamp: float = 0.0
 ...     image: "uint8[480,640,3]" = None
 >>> 
->>> shm = SharedMemory(ImageFrame, name="camera")
+>>> shm = SharedMemory(ImageFrame, name="camera", create=True)
 >>> frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
 >>> shm.write(frame_id=42, timestamp=time.time(), image=frame)
 >>> 
@@ -361,7 +361,7 @@ class SharedMemory:
         Shared memory name. If None, generates unique name accessible via `.name`.
     slots : int, default=1
         Number of buffer slots. 1 for single-slot mode, >1 for FIFO mode.
-    create : bool, default=True
+    create : bool, default=False
         If True, creates new shared memory. If False, opens existing.
     
     Attributes
@@ -377,7 +377,7 @@ class SharedMemory:
     --------
     Single-slot mode (direct write):
     
-    >>> shm = SharedMemory(MyDataClass, name="sensor1")
+    >>> shm = SharedMemory(MyDataClass, name="sensor1", create=True)
     >>> shm.write(temperature=23.5, pressure=1013.0)
     >>> data = shm.read(timeout=0)
     >>> if data.temperature.valid:
@@ -385,7 +385,7 @@ class SharedMemory:
     
     FIFO mode (staged write):
     
-    >>> fifo = SharedMemory(MyDataClass, name="buffer", slots=10)
+    >>> fifo = SharedMemory(MyDataClass, name="buffer", slots=10, create=True)
     >>> fifo.write(value1=1.0)
     >>> fifo.write(value2=2.0)
     >>> fifo.finalize()  # Commit atomically
@@ -401,7 +401,7 @@ class SharedMemory:
     """
     
     def __init__(self, dataclass_type: Type, name: Optional[str] = None, 
-                 slots: int = 1, create: bool = True):
+                 slots: int = 1, create: bool = False):
         if slots < 1:
             raise ValueError("slots must be >= 1")
         
@@ -614,7 +614,7 @@ class SharedMemory:
         
         Examples
         --------
-        >>> shm = SharedMemory(MyData, name="test")
+        >>> shm = SharedMemory(MyData, name="test", create=True)
         >>> # ... use shm ...
         >>> shm.close()
         """

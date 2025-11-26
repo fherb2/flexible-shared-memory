@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "flexible-shared-memory"
-version = "0.1.0"
+version = "0.1.1"
 description = "High-performance lock-free shared memory for inter-process communication with automatic type mapping"
 authors = ["fherb2 <fherb2@gitlab.com>"]
 license = "MIT"

@@ -42,7 +42,7 @@ from .shared_memory import (
     ValueWithStatus,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __author__ = "fherb2"
 __license__ = "MIT"
 

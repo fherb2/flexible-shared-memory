@@ -442,26 +442,6 @@ git push origin v0.1.1
 ```
 Breaking change? (API incompatible)
 ├─ Yes → MAJOR (0.x.y → 1.0.0)
-└─ No
-   └─ New feature? (Backward compatible)
-      ├─ Yes → MINOR (0.1.x → 0.2.0)
-      └─ No
-         └─ Bug fix only? → PATCH (0.1.0 → 0.1.1)
-```
-
----
-
-## Tips
-
-### Best Practices
-
-1. **Commit often**: Small, focused commits are better than large ones
-2. **Test first**: Run tests before committing
-3. **Clear messages**: Write descriptive commit messages
-4. **Update docs**: Keep README and docstrings current
-5. **Check CI**: Ensure GitHub Actions passes before releasing
-
-### Avoid
 
 - ❌ Committing directly to `main` (except for solo hotfixes)
 - ❌ Pushing broken tests

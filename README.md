@@ -46,7 +46,7 @@ class SensorData:
 
 ```python
 # Create shared memory
-shm = SharedMemory(SensorData, name="sensors")
+shm = SharedMemory(SensorData, name="sensors", create=True)
 
 # Write data
 shm.write(
@@ -65,7 +65,7 @@ shm.unlink()
 
 ```python
 # Connect to existing shared memory
-shm = SharedMemory(SensorData, name="sensors", create=False)
+shm = SharedMemory(SensorData, name="sensors")
 
 # Read data with status
 data = shm.read(timeout=1.0)
@@ -126,7 +126,7 @@ For buffered communication with multiple slots:
 
 ```python
 # Create FIFO with 10 slots
-fifo = SharedMemory(SensorData, name="buffer", slots=10)
+fifo = SharedMemory(SensorData, name="buffer", slots=10, create=True)
 
 # Writer: Stage and commit
 fifo.write(temperature=23.5)
@@ -148,7 +148,7 @@ data = fifo.read(timeout=0.5, latest=True)   # Skip to newest
 class MathData:
     coefficients: "float64[5]" = None  # [a0, a1, a2, a3, a4]
 
-shm = SharedMemory(MathData, name="math")
+shm = SharedMemory(MathData, name="math", create=True)
 data = shm.read()
 
 coeffs = data.coefficients
