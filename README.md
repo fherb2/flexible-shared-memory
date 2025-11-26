@@ -1,5 +1,7 @@
 # Flexible Shared Memory
 
+[![Tests](https://github.com/fherb2/flexible-shared-memory/actions/workflows/test.yml/badge.svg)](https://github.com/fherb2/flexible-shared-memory/actions)
+
 A high-performance, lock-free shared memory system for inter-process communication in Python with automatic type mapping and field-level status tracking.
 
 ## Features
