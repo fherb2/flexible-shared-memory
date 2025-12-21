@@ -1,158 +1,56 @@
 """
-Lock-Free Shared Memory System with Automatic Type Mapping
-===========================================================
+Lock-Free Shared Memory System with Self-Describing Header
+============================================================
 
 This module provides a high-performance, lock-free shared memory system for 
 inter-process communication in Python. It automatically maps Python dataclasses 
-to shared memory layouts and supports both single-slot and FIFO (ring buffer) modes.
+to shared memory layouts and stores configuration in the header so readers
+can auto-detect all settings.
 
 License
 -------
 MIT License - Copyright (c) 2024 fherb2
 https://gitlab.com/fherb2/flexible-shared-memory
 
-Features
---------
-- **Automatic type mapping**: Define data structure as dataclass, shared memory 
-  layout is generated automatically
-- **Lock-free operation**: Uses sequence numbers for consistent reads without locks
-- **NumPy integration**: Supports multi-dimensional arrays for images, oscilloscope 
-  data, etc.
-- **String support**: UTF-8 encoded strings with character-count limits
-- **Field-level status**: Each field tracks valid, modified, truncated, unwritten state
-- **FIFO mode**: Ring buffer with configurable slots for buffered communication
-- **Single-slot mode**: Minimal latency for single value updates
+Key Feature: Self-Describing Header
+------------------------------------
+The shared memory contains a header with ALL configuration:
+- Number of slots (FIFO vs single-slot)
+- Field layout (offsets, types, sizes)
+- Dataclass structure
 
-Type Annotations
-----------------
-Define field types using standard Python types and custom annotations:
+Readers can open with just the name - no configuration needed!
 
-Scalar types:
-    - `float` → 64-bit float (numpy.float64)
-    - `int` → 32-bit integer (numpy.int32)  
-    - `bool` → boolean
+IMPORTANT: Dataclass Compatibility
+-----------------------------------
+The dataclass structure is FROZEN at shared memory creation time.
+All processes (writer and readers) MUST use the EXACT SAME dataclass
+definition:
+- Same field names
+- Same field types  
+- Same field order
+- Same type annotations (e.g., str[64], float64[10,10])
 
-Strings (UTF-8, character-count based):
-    - `"str[64]"` → Max 64 Unicode characters (allocates 260 bytes)
-    - Supports all Unicode: ASCII, Cyrillic, Chinese, Japanese, Emojis
+If the dataclass changes (fields added/removed/reordered), the header hash
+will mismatch and readers will raise a ValueError. This is intentional to
+prevent silent data corruption.
 
-Arrays:
-    - `"float32[480,640,3]"` → 3D array of shape (480, 640, 3)
-    - Supported dtypes: float32, float64, int8, int16, int32, int64, 
-      uint8, uint16, uint32, uint64, bool
+Header Structure:
+    Bytes 0-7:    Hash (lower 8 bytes of SHA256 over header data)
+    Bytes 8-11:   Header Length (uint32)
+    Bytes 12-19:  Total Length (uint64)
+    Bytes 20-23:  slots (uint32)
+    Bytes 24+:    Pickled layout info
 
-Examples
---------
-Basic single-slot usage:
-
->>> from dataclasses import dataclass
->>> import numpy as np
->>> 
->>> @dataclass
->>> class SensorData:
-...     temperature: float = 0.0
-...     pressure: float = 0.0
-...     timestamp: float = 0.0
-...     status_msg: "str[32]" = ""
->>> 
->>> # Writer process
->>> shm = SharedMemory(SensorData, name="sensors", create=True)
->>> shm.write(temperature=23.5, pressure=1013.25, status_msg="OK")
->>> data = shm.read(timeout=0)
->>> 
->>> # Access values with status
->>> temp = data.temperature
->>> if temp.valid and temp.modified:
-...     print(f"Temperature: {temp.value}°C")
->>> 
->>> # Handle invalid data
->>> if not temp.valid:
-...     if temp.truncated:
-...         print("Error: Temperature data was truncated!")
-...     elif temp.unwritten:
-...         print("Warning: Temperature never written")
->>> 
->>> shm.close()
->>> shm.unlink()
-
-Field status checking:
-
->>> data = shm.read()
->>> pos = data.position
->>> 
->>> # Check individual status flags
->>> if pos.valid:
-...     use(pos.value)
->>> 
->>> if pos.modified:
-...     print("Position changed!")
->>> 
->>> if pos.truncated:
-...     print("Warning: position was truncated")
->>> 
->>> if pos.unwritten:
-...     print("Position never written")
->>> 
->>> # Auto-conversion with magic methods
->>> x = float(pos)  # Automatic conversion
->>> y = pos.value   # Explicit access
-
-FIFO usage with buffering:
-
->>> @dataclass
->>> class ControllerState:
-...     position: float = 0.0
-...     velocity: float = 0.0
-...     command: "str[16]" = ""
->>> 
->>> # Writer process - fast control loop
->>> fifo = SharedMemory(ControllerState, name="ctrl", slots=10, create=True)
->>> for i in range(100):
-...     fifo.write(position=i*0.1, velocity=i*0.05)
-...     fifo.finalize()  # Make data available atomically
->>> fifo.close()
->>> fifo.unlink()
->>> 
->>> # Reader process - monitoring at lower rate
->>> fifo = SharedMemory(ControllerState, name="ctrl", slots=10)
->>> data = fifo.read(timeout=1.0, latest=False)
->>> if data.position.modified:
-...     print(f"New position: {data.position.value}")
->>> fifo.close()
-
-Reset modified flag for single-reader scenarios:
-
->>> # Single reader that wants to track changes
->>> shm = SharedMemory(SensorData, name="sensor1")
->>> while True:
-...     data = shm.read(timeout=1.0, reset_modified=True)
-...     if data.temperature.modified:
-...         print("Temperature changed!")
-
-Image/array transfer:
-
->>> @dataclass
->>> class ImageFrame:
-...     frame_id: int = 0
-...     timestamp: float = 0.0
-...     image: "uint8[480,640,3]" = None
->>> 
->>> shm = SharedMemory(ImageFrame, name="camera", create=True)
->>> frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
->>> shm.write(frame_id=42, timestamp=time.time(), image=frame)
->>> 
->>> data = shm.read(timeout=0.5)
->>> if data.image.valid and not data.image.truncated:
-...     img = data.image.value  # NumPy array
-...     print(img.shape)
-
-Notes
------
-- Field status flags persist until next write (consistent for all readers)
-- FIFO overwrites oldest data when full (no blocking)
-- Reading blocks until data available or timeout expires
-- Sequence numbers ensure consistent reads without locks
-- String and array truncation sets truncated flag per field
+Example:
+    # Writer process
+    shm = SharedMemory(SensorData, name="sensors", create=True, slots=5)
+    shm.write(temperature=23.5)
+    shm.finalize()
+    
+    # Reader process (auto-detects slots=5!)
+    shm = SharedMemory(SensorData, name="sensors")
+    data = shm.read()
 """
 
 from dataclasses import dataclass, fields
@@ -162,14 +60,30 @@ from typing import Type, Any, Optional
 import time
 import re
 import uuid
+import pickle
+import struct
+import hashlib
+import sys
 
+
+# Header constants
+FIXED_HEADER_SIZE = 24  # Hash(8) + HeaderLen(4) + TotalLen(8) + slots(4)
+
+
+def _check_python_version():
+    """Ensure Python version supports stable field ordering."""
+    if sys.version_info < (3, 7):
+        raise RuntimeError(
+            "This module requires Python 3.7+.\n"
+            "Earlier versions do not guarantee stable dataclass field order,\n"
+            "which is critical for shared memory layout consistency."
+        )
+
+_check_python_version()
 
 class FieldStatus:
     """
     Status flags for a single field in shared memory.
-    
-    Provides information about validity, modifications, and truncation
-    for individual fields.
     
     Attributes
     ----------
@@ -181,104 +95,44 @@ class FieldStatus:
         True if field value was truncated during write.
     is_unwritten : bool
         True if field was never written.
-    
-    Notes
-    -----
-    A field is only valid if it contains the complete, exact data from the source.
-    Truncated data may be unusable (e.g., incomplete polynomial coefficients).
-    Users must check truncated/unwritten flags to decide how to handle invalid data.
-    
-    Examples
-    --------
-    >>> status = data.position_status
-    >>> if status.is_valid and status.is_modified:
-    ...     process_update(data.position)
-    >>> elif status.is_truncated:
-    ...     log.error("Position data truncated - cannot use!")
-    >>> elif status.is_unwritten:
-    ...     log.warning("No position data available")
+    is_overflow : bool
+        True if FIFO overflow caused data loss (FIFO mode only).
     """
     
-    # Bit masks for status byte
     MASK_TRUNCATED = 0b00000001
     MASK_UNWRITTEN = 0b00000010
     MASK_MODIFIED = 0b00000100
+    MASK_OVERFLOW = 0b00001000
     
     def __init__(self, status_byte: int):
         self._status = status_byte
     
     @property
     def is_truncated(self) -> bool:
-        """True if field was truncated during write."""
         return bool(self._status & self.MASK_TRUNCATED)
     
     @property
     def is_unwritten(self) -> bool:
-        """True if field was never written."""
         return bool(self._status & self.MASK_UNWRITTEN)
     
     @property
     def is_modified(self) -> bool:
-        """True if field was written since slot/reset."""
         return bool(self._status & self.MASK_MODIFIED)
     
     @property
+    def is_overflow(self) -> bool:
+        return bool(self._status & self.MASK_OVERFLOW)
+    
+    @property
     def is_valid(self) -> bool:
-        """True if field is an exact copy of source (not truncated or unwritten)."""
         return not (self.is_truncated or self.is_unwritten)
 
+    def _update(self, status_byte: int):
+        """Update status from byte (for object pooling)."""
+        self._status = status_byte
 
 class ValueWithStatus:
-    """
-    Wrapper for field values with status information.
-    
-    Provides pythonic access to both the field value and its status flags.
-    
-    Parameters
-    ----------
-    value : any
-        The actual field value (float, int, str, np.ndarray, etc.)
-    status : FieldStatus
-        Status information for this field
-    
-    Attributes
-    ----------
-    value : any
-        The actual field value
-    valid : bool
-        True if field is an exact copy of source (not truncated or unwritten)
-    modified : bool
-        Shortcut for status.is_modified
-    truncated : bool
-        Shortcut for status.is_truncated
-    unwritten : bool
-        Shortcut for status.is_unwritten
-    
-    Notes
-    -----
-    Always check 'valid' first. If False, check 'truncated' and 'unwritten' to
-    determine the appropriate error handling strategy.
-    
-    Examples
-    --------
-    >>> pos = data.position
-    >>> if pos.valid and pos.modified:
-    ...     x = pos.value  # Exact copy from source
-    ...     y = float(pos)  # Magic conversion
-    >>> elif pos.truncated:
-    ...     # Handle error - data may be unusable
-    ...     log.error("Position data incomplete!")
-    >>> 
-    >>> # Works with all types
-    >>> msg = data.message
-    >>> if msg.valid:
-    ...     text = msg.value  # str
-    >>> 
-    >>> img = data.image
-    >>> if img.valid:
-    ...     arr = img.value  # np.ndarray
-    ...     arr2 = np.array(img)  # Magic
-    """
+    """Wrapper for field values with status information."""
     
     def __init__(self, value: Any, status: FieldStatus):
         self._value = value
@@ -286,30 +140,28 @@ class ValueWithStatus:
     
     @property
     def value(self) -> Any:
-        """The actual field value."""
         return self._value
     
     @property
     def valid(self) -> bool:
-        """True if field is an exact copy of source (not truncated or unwritten)."""
         return self._status.is_valid
     
     @property
     def modified(self) -> bool:
-        """True if written since slot creation or last reset."""
         return self._status.is_modified
     
     @property
     def truncated(self) -> bool:
-        """True if value was truncated during write."""
         return self._status.is_truncated
     
     @property
     def unwritten(self) -> bool:
-        """True if never written."""
         return self._status.is_unwritten
     
-    # Magic methods for automatic conversion
+    @property
+    def overflow(self) -> bool:
+        return self._status.is_overflow
+    
     def __float__(self) -> float:
         return float(self._value)
     
@@ -325,11 +177,9 @@ class ValueWithStatus:
     def __repr__(self) -> str:
         return f"ValueWithStatus({self._value!r}, valid={self.valid}, modified={self.modified})"
     
-    # NumPy support
     def __array__(self):
         return np.asarray(self._value)
     
-    # Arithmetic operations
     def __add__(self, other):
         return self._value + other
     
@@ -341,261 +191,321 @@ class ValueWithStatus:
     
     def __truediv__(self, other):
         return self._value / other
+    
+    def _update(self, value: Any, status: FieldStatus):
+        """Update value and status (for object pooling)."""
+        self._value = value
+        self._status = status
 
 
 class SharedMemory:
     """
-    Lock-free shared memory for inter-process communication.
+    Lock-free shared memory with self-describing header.
     
-    Supports single-slot (minimal latency) and multi-slot FIFO (buffered) modes.
-    Automatically maps Python dataclasses to shared memory layouts with sequence
-    numbers for consistent lock-free reading. Each field has individual status
-    tracking (valid, modified, truncated, unwritten).
+    The header contains all configuration, so readers only need the name.
+    
+    WARNING: Single Writer Only
+    ----------------------------
+    This implementation is designed for SINGLE-WRITER, MULTIPLE-READER
+    scenarios. Using multiple concurrent writers will cause data corruption
+    because:
+    - No locks are used (lock-free design)
+    - Sequence numbers protect against read-during-write, NOT write-during-write
+    - Field status flags will be inconsistent
+    
+    For multi-writer scenarios, use proper process locks (multiprocessing.Lock)
+    or a different IPC mechanism.
     
     Parameters
     ----------
     dataclass_type : Type
-        Dataclass type defining the data structure. Should NOT include any
-        status fields - these are handled automatically.
+        Dataclass type defining the data structure.
     name : str, optional
-        Shared memory name. If None, generates unique name accessible via `.name`.
-    slots : int, default=1
-        Number of buffer slots. 1 for single-slot mode, >1 for FIFO mode.
+        Shared memory name. If None, generates unique name.
+    slots : int, optional
+        Number of buffer slots. Only used when create=True.
+        Readers auto-detect this from header.
     create : bool, default=False
         If True, creates new shared memory. If False, opens existing.
     
-    Attributes
-    ----------
-    name : str
-        Shared memory identifier, can be passed to other processes.
-    slots : int
-        Number of buffer slots.
-    is_fifo : bool
-        True if slots > 1 (FIFO mode), False otherwise.
-    
     Examples
     --------
-    Single-slot mode (direct write):
+    Writer:
+        shm = SharedMemory(SensorData, name="sensors", create=True, slots=5)
+        shm.write(temperature=23.5)
+        shm.finalize()
     
-    >>> shm = SharedMemory(MyDataClass, name="sensor1", create=True)
-    >>> shm.write(temperature=23.5, pressure=1013.0)
-    >>> data = shm.read(timeout=0)
-    >>> if data.temperature.valid:
-    ...     print(data.temperature.value)
-    
-    FIFO mode (staged write):
-    
-    >>> fifo = SharedMemory(MyDataClass, name="buffer", slots=10, create=True)
-    >>> fifo.write(value1=1.0)
-    >>> fifo.write(value2=2.0)
-    >>> fifo.finalize()  # Commit atomically
-    >>> data = fifo.read(timeout=1.0, latest=False)
-    
-    Notes
-    -----
-    - Single-slot: write() commits immediately, no finalize() needed
-    - FIFO: write() stages data, finalize() commits atomically
-    - Always call close() before process exits
-    - Only creator should call unlink()
-    - Field status persists until next write (all readers see same state)
+    Reader (auto-detects slots!):
+        shm = SharedMemory(SensorData, name="sensors")
+        data = shm.read()
     """
     
     def __init__(self, dataclass_type: Type, name: Optional[str] = None, 
-                 slots: int = 1, create: bool = False):
-        if slots < 1:
-            raise ValueError("slots must be >= 1")
+                 slots: Optional[int] = None, create: bool = False):
         
         self.dataclass_type = dataclass_type
-        self.slots = slots
-        self.is_fifo = slots > 1
         
         # Generate name if not provided
         if name is None:
             name = f"shm_{uuid.uuid4().hex[:8]}"
         
-        # Analyze dataclass structure
-        self._layout = _SharedMemoryLayout(dataclass_type)
-        self._slot_size = self._layout.total_size
-        
-        # FIFO metadata size: write_idx(8) + read_idx(8) + count(8) = 24 bytes
-        metadata_size = 24 if self.is_fifo else 0
-        total_size = metadata_size + self._slot_size * slots
-        
-        # Set offsets BEFORE using them
-        self._metadata_offset = 0
-        self._data_offset = metadata_size
-        
-        # Create or open shared memory
         if create:
+            # WRITER: Create with specified configuration
+            if slots is None:
+                slots = 1
+            if slots < 1:
+                raise ValueError("slots must be >= 1")
+            
+            self.slots = slots
+            self.is_fifo = slots > 1
+            
+            # Analyze dataclass structure
+            self._layout = _SharedMemoryLayout(dataclass_type)
+            self._slot_size = self._layout.total_size
+            
+            # Build header
+            header = self._build_header()
+            
+            # FIFO metadata size
+            metadata_size = 24 if self.is_fifo else 0
+            data_size = metadata_size + self._slot_size * slots
+            total_size = len(header) + data_size
+            
+            # Create shared memory
             self.shm = shared_memory.SharedMemory(
                 name=name,
                 create=True,
                 size=total_size
             )
+            
+            # Write header
+            self.shm.buf[0:len(header)] = header
+            
+            # Set offsets
+            self._header_size = len(header)
+            self._metadata_offset = self._header_size
+            self._data_offset = self._header_size + metadata_size
+            
             # Initialize FIFO metadata
             if self.is_fifo:
                 self._set_fifo_metadata(0, 0, 0)
             
-            # Initialize all slots with unwritten flags
+            # Initialize all slots
             for slot_idx in range(slots):
                 self._initialize_slot(slot_idx)
+        
         else:
-            self.shm = shared_memory.SharedMemory(name=name)
+            # READER: Auto-detect configuration from header
+
+            # Reject slots parameter for reader (auto-detection only)
+            if slots is not None:
+                raise ValueError(
+                    "Reader mode does not accept 'slots' parameter.\n"
+                    "The number of slots is auto-detected from the shared memory header.\n"
+                    "Remove the 'slots' argument when opening existing shared memory."
+                )
+            
+            # Step 1: Read fixed header (24 bytes)
+            shm_temp = shared_memory.SharedMemory(name=name)
+            
+            if shm_temp.size < FIXED_HEADER_SIZE:
+                shm_temp.close()
+                raise ValueError(f"Shared memory too small: {shm_temp.size} bytes")
+            
+            stored_hash = int.from_bytes(shm_temp.buf[0:8], 'little')
+            header_length = int.from_bytes(shm_temp.buf[8:12], 'little')
+            total_length = int.from_bytes(shm_temp.buf[12:20], 'little')
+            slots_from_header = int.from_bytes(shm_temp.buf[20:24], 'little')
+            
+            # Step 2: Read complete header and validate hash
+            if shm_temp.size < header_length:
+                shm_temp.close()
+                raise ValueError(f"Header size mismatch: need {header_length}, have {shm_temp.size}")
+            
+            header_data = bytes(shm_temp.buf[8:header_length])
+            stored_header_hash = self._compute_hash(header_data)
+            
+            # Step 3: Compute hash from OUR dataclass to verify compatibility
+            temp_layout = _SharedMemoryLayout(dataclass_type)
+            our_layout_dict = temp_layout.to_dict()
+            our_layout_pickle = pickle.dumps(our_layout_dict)
+            
+            # Build header data exactly as writer would (using actual header_length and total_length)
+            our_header_data = bytearray()
+            our_header_data.extend(struct.pack('<I', header_length))  # Use actual header length
+            our_header_data.extend(struct.pack('<Q', total_length))   # Use actual total length
+            our_header_data.extend(struct.pack('<I', slots_from_header))
+            our_header_data.extend(our_layout_pickle)
+            
+            our_computed_hash = self._compute_hash(bytes(our_header_data))
+            
+            # Compare: our layout hash vs stored layout hash
+            if stored_header_hash != our_computed_hash:
+                shm_temp.close()
+                raise ValueError(
+                    f"Dataclass structure mismatch!\n"
+                    f"The shared memory was created with a different dataclass definition.\n"
+                    f"Ensure all processes use the EXACT SAME dataclass:\n"
+                    f"  - Same field names and order\n"
+                    f"  - Same types and annotations\n"
+                    f"Expected hash: {our_computed_hash:016x}\n"
+                    f"Found hash:    {stored_header_hash:016x}"
+                )
+            
+            # Step 4: Parse header (hash validated - safe to use stored layout)
+            self.slots = slots_from_header
+            self.slots = slots_from_header
+            self.is_fifo = self.slots > 1
+            
+            # Unpickle layout
+            layout_pickle = bytes(shm_temp.buf[24:header_length])
+            layout_dict = pickle.loads(layout_pickle)
+            self._layout = _SharedMemoryLayout.from_dict(layout_dict, dataclass_type)
+            self._slot_size = self._layout.total_size
+            
+            # Verify total size
+            metadata_size = 24 if self.is_fifo else 0
+            expected_size = header_length + metadata_size + self._slot_size * self.slots
+            
+            if shm_temp.size < expected_size:
+                shm_temp.close()
+                raise ValueError(f"Shared memory size mismatch: need {expected_size}, have {shm_temp.size}")
+            
+            self.shm = shm_temp
+            
+            # Set offsets
+            self._header_size = header_length
+            self._metadata_offset = self._header_size
+            self._data_offset = self._header_size + metadata_size
         
         self.name = self.shm.name
         
         # Current write buffer for staging (FIFO mode)
         self._write_buffer = {}
         self._write_buffer_dirty = False
+        
+        # Object pools for performance (avoid allocations in hot path)
+        num_fields = len(self._layout.fields)
+        self._field_status_pool = [FieldStatus(0) for _ in range(num_fields)]
+        self._value_status_pool = [ValueWithStatus(None, FieldStatus(0)) for _ in range(num_fields)]
+        self._read_dict = {}  # Reusable dict for reads
+    
+    def _build_header(self) -> bytes:
+        """Build header with hash."""
+        # Serialize layout to dict
+        layout_dict = self._layout.to_dict()
+        layout_pickle = pickle.dumps(layout_dict)
+        
+        # Build header data (everything after hash)
+        header_data = bytearray()
+        
+        # Header Length (will be filled in later) - 4 bytes
+        header_data.extend(b'\x00' * 4)
+        
+        # Total Length (will be filled in later) - 8 bytes
+        header_data.extend(b'\x00' * 8)
+        
+        # slots - 4 bytes
+        header_data.extend(struct.pack('<I', self.slots))
+        
+        # Pickled layout
+        header_data.extend(layout_pickle)
+        
+        # Now we know header length
+        header_length = 8 + len(header_data)  # 8 for hash
+        
+        # Fill in header length
+        struct.pack_into('<I', header_data, 0, header_length)
+        
+        # Total length will be filled by caller
+        # (we don't know data size yet)
+        
+        # Compute hash over header_data
+        hash_value = self._compute_hash(bytes(header_data))
+        
+        # Build complete header
+        complete_header = bytearray()
+        complete_header.extend(struct.pack('<Q', hash_value))  # 8 bytes hash
+        complete_header.extend(header_data)
+        
+        return bytes(complete_header)
+    
+    def _compute_hash(self, data: bytes) -> int:
+        """Compute lower 8 bytes of SHA256 as uint64."""
+        hash_bytes = hashlib.sha256(data).digest()
+        return int.from_bytes(hash_bytes[-8:], 'little')
     
     def write(self, **kwargs):
         """
         Write field values to shared memory.
         
-        In single-slot mode, data is written immediately. In FIFO mode, data is
-        staged in a buffer until finalize() is called. Sets modified flag for
-        written fields.
-        
-        Parameters
-        ----------
-        **kwargs
-            Field names and values to write. Field names must match dataclass fields.
-            Values are automatically converted and truncated if necessary.
-        
-        Examples
-        --------
-        >>> shm.write(temperature=23.5, pressure=1013.25, status="OK")
-        >>> shm.write(image=np.random.rand(480, 640, 3))
-        
-        Notes
-        -----
-        - Strings longer than field size are truncated, sets truncated flag
-        - Arrays larger than field size are truncated, sets truncated flag
-        - In FIFO mode, must call finalize() to commit
-        - In single-slot mode, writes are immediately visible
-        - Sets modified flag for all written fields
+        In single-slot mode, data is written immediately. 
+        In FIFO mode, data is staged until finalize().
         """
         if self.is_fifo:
-            # Stage data in buffer
             self._write_buffer.update(kwargs)
             self._write_buffer_dirty = True
         else:
-            # Write directly to slot 0
             self._write_to_slot(0, kwargs)
     
     def finalize(self):
-        """
-        Finalize staged write in FIFO mode.
-        
-        Makes buffered data atomically available for reading. Only used in FIFO
-        mode (slots > 1). In single-slot mode, this raises an error.
-        
-        Raises
-        ------
-        RuntimeError
-            If called in single-slot mode (slots=1).
-        
-        Examples
-        --------
-        >>> fifo.write(position=1.5, velocity=2.0)
-        >>> fifo.write(timestamp=time.time())
-        >>> fifo.finalize()  # Now all values are atomically visible
-        
-        Notes
-        -----
-        - Advances write pointer and makes data available
-        - If buffer is full, overwrites oldest unread data
-        - Clears write buffer after commit
-        - Sets modified flag for written fields
-        """
-        if not self.is_fifo:
-            raise RuntimeError("finalize() only for FIFO (slots > 1)")
+        """Finalize staged write in FIFO mode."""
+        # Performance: Skip runtime check (design assumption: caller knows mode)
+        # if not self.is_fifo:
+        #     raise RuntimeError("finalize() only for FIFO (slots > 1)")
         
         if not self._write_buffer_dirty:
             return
         
-        # Get current FIFO state
         write_idx, read_idx, count = self._get_fifo_metadata()
         
-        # Write to current write slot
-        slot_idx = write_idx % self.slots
-        self._write_to_slot(slot_idx, self._write_buffer)
+        # Check if overflow will occur
+        overflow = (count >= self.slots)
         
-        # Advance write pointer
+        slot_idx = write_idx % self.slots
+        self._write_to_slot(slot_idx, self._write_buffer, overflow=overflow)
+        
         write_idx += 1
         
-        # Update count and potentially advance read pointer
         if count < self.slots:
             count += 1
         else:
-            # Buffer full, overwrite oldest
             read_idx += 1
         
         self._set_fifo_metadata(write_idx, read_idx, count)
         
-        # Clear buffer
-        self._write_buffer = {}
+        self._write_buffer.clear()  # Performance: Reuse dict instead of new allocation
         self._write_buffer_dirty = False
     
     def read(self, timeout: float = 0, latest: bool = False, 
-             reset_modified: bool = False) -> Optional[Any]:
-        """
-        Read data from shared memory.
-        
-        Blocks until data is available or timeout expires. Uses sequence numbers
-        to ensure consistent reads without locks. Returns dataclass instance with
-        all fields wrapped in ValueWithStatus.
+            reset_modified: bool = False) -> Optional[Any]:
+        """Read data from shared memory.
         
         Parameters
         ----------
         timeout : float, default=0
-            Maximum wait time in seconds. 0 means non-blocking (return None if empty).
+            Maximum time to wait for data in seconds. 0 = no wait.
         latest : bool, default=False
-            If True (FIFO only), skips to most recent data, discarding older entries.
-            Useful for monitoring at lower rates than write rate.
+            In FIFO mode, skip to most recent data.
         reset_modified : bool, default=False
-            If True (single-slot only), resets modified flags after reading.
-            Useful for single-reader scenarios to track changes.
+            Clear the 'modified' flag after reading.
+            Only supported in single-slot mode (slots=1).
+            Raises ValueError in FIFO mode.
         
         Returns
         -------
-        dataclass instance or None
-            Instance with all fields wrapped as ValueWithStatus objects, or None
-            if timeout. Access field values via .value property or magic conversion.
+        Dataclass instance with ValueWithStatus fields, or None if timeout.
         
-        Examples
-        --------
-        Non-blocking read:
-        
-        >>> data = shm.read(timeout=0)
-        >>> if data:
-        ...     temp = data.temperature
-        ...     if temp.valid and temp.modified:
-        ...         print(f"New temp: {temp.value}")
-        
-        Blocking read with timeout:
-        
-        >>> data = fifo.read(timeout=1.0)
-        >>> if data is None:
-        ...     print("Timeout")
-        
-        Skip to most recent (FIFO):
-        
-        >>> data = fifo.read(timeout=0.5, latest=True)
-        
-        Single reader with change tracking:
-        
-        >>> data = shm.read(reset_modified=True)
-        >>> if data.position.modified:
-        ...     print("Position changed since last read")
+        Raises
+        ------
+        ValueError
+            If reset_modified=True in FIFO mode (slots > 1).
         
         Notes
         -----
-        - Returns None if no data available within timeout
-        - Sequence numbers ensure consistent data (no partial writes)
-        - FIFO with latest=True discards unread older data
-        - reset_modified only works in single-slot mode
-        - All field values are ValueWithStatus objects
+        In FIFO mode, reset_modified is not supported because multiple
+        readers could consume the same slot, making the modified flag
+        ambiguous (modified for which reader?).
         """
         if reset_modified and self.is_fifo:
             raise ValueError("reset_modified only supported in single-slot mode")
@@ -606,53 +516,26 @@ class SharedMemory:
             return self._read_single(timeout, reset_modified)
     
     def close(self):
-        """
-        Close shared memory connection.
-        
-        Must be called by all processes before exit. Does not delete the shared
-        memory segment (use unlink() for that).
-        
-        Examples
-        --------
-        >>> shm = SharedMemory(MyData, name="test", create=True)
-        >>> # ... use shm ...
-        >>> shm.close()
-        """
+        """Close shared memory connection."""
         self.shm.close()
     
     def unlink(self):
-        """
-        Delete shared memory segment from system.
-        
-        Should only be called by the process that created the shared memory
-        (create=True). Call after all processes have called close().
-        
-        Examples
-        --------
-        >>> # In creator process:
-        >>> shm = SharedMemory(MyData, name="test", create=True)
-        >>> # ... use shm ...
-        >>> shm.close()
-        >>> shm.unlink()  # Delete from system
-        """
+        """Delete shared memory segment from system."""
         self.shm.unlink()
     
     def _initialize_slot(self, slot_idx: int):
         """Initialize slot with unwritten flags."""
         offset = self._get_slot_offset(slot_idx)
         
-        # seq_begin = 0
-        self._write_uint64(offset, 0)
+        self._write_uint64(offset, 0)  # seq_begin
         
-        # All fields unwritten
         num_fields = len(self._layout.fields)
         status_offset = offset + 8
         for i in range(num_fields):
             self.shm.buf[status_offset + i] = FieldStatus.MASK_UNWRITTEN
         
-        # seq_end = 0
         seq_end_offset = offset + self._slot_size - 8
-        self._write_uint64(seq_end_offset, 0)
+        self._write_uint64(seq_end_offset, 0)  # seq_end
     
     def _get_slot_offset(self, slot_idx: int) -> int:
         """Get memory offset for slot."""
@@ -691,29 +574,22 @@ class SharedMemory:
         self._write_uint64(self._metadata_offset + 8, read_idx)
         self._write_uint64(self._metadata_offset + 16, count)
     
-    def _write_to_slot(self, slot_idx: int, data: dict):
+    def _write_to_slot(self, slot_idx: int, data: dict, overflow: bool = False):
         """Write data to slot with sequence numbers."""
         offset = self._get_slot_offset(slot_idx)
         
-        # Read current sequence
         seq = self._read_uint64(offset)
-        
-        # Increment sequence and write seq_begin
         seq += 1
         self._write_uint64(offset, seq)
         
-        # Get status array offset
         status_offset = offset + 8
         
-        # Write fields and update status
         for idx, field_info in enumerate(self._layout.fields):
             field_offset = offset + field_info.offset
             
             if field_info.name in data:
-                # Field is being written
                 value = data[field_info.name]
                 
-                # Write value
                 truncated = False
                 if field_info.is_scalar:
                     self._write_scalar(field_offset, value, field_info.field_type)
@@ -722,7 +598,6 @@ class SharedMemory:
                 elif field_info.is_array:
                     truncated = self._write_array(field_offset, value, field_info)
                 
-                # Update status: clear unwritten, set modified
                 status = self.shm.buf[status_offset + idx]
                 status &= ~FieldStatus.MASK_UNWRITTEN
                 status |= FieldStatus.MASK_MODIFIED
@@ -732,14 +607,17 @@ class SharedMemory:
                 else:
                     status &= ~FieldStatus.MASK_TRUNCATED
                 
+                if overflow:
+                    status |= FieldStatus.MASK_OVERFLOW
+                else:
+                    status &= ~FieldStatus.MASK_OVERFLOW
+                
                 self.shm.buf[status_offset + idx] = status
             else:
-                # Field not written in this update - clear modified flag
                 status = self.shm.buf[status_offset + idx]
                 status &= ~FieldStatus.MASK_MODIFIED
                 self.shm.buf[status_offset + idx] = status
         
-        # Write seq_end (same as seq_begin = consistent)
         seq_end_offset = offset + self._slot_size - 8
         self._write_uint64(seq_end_offset, seq)
     
@@ -754,42 +632,47 @@ class SharedMemory:
     
     def _write_string(self, offset: int, value: str, field_info: '_FieldInfo') -> bool:
         """Write string with UTF-8 encoding, return True if truncated."""
-        # Truncate by character count
-        truncated = len(value) > field_info.string_max_chars
-        if truncated:
-            value = value[:field_info.string_max_chars]
+        max_bytes = field_info.string_max_bytes  # Performance: Use pre-cached value
         
-        # Encode to UTF-8
+        # Check character truncation FIRST (before encoding)
+        char_truncated = len(value) > field_info.string_max_chars
+        if char_truncated:
+            value = value[:field_info.string_max_chars]  # Truncate to max characters
+        
         encoded = value.encode('utf-8')
         
-        # Write length
-        self._write_uint32(offset, len(encoded))
+        # Check byte truncation (should rarely happen with 4x reserve, safety fallback)
+        if len(encoded) > max_bytes:
+            # Truncate to max_bytes, but ensure valid UTF-8 boundary
+            encoded = encoded[:max_bytes]
+            # Walk backwards to find valid UTF-8 start
+            while len(encoded) > 0:
+                try:
+                    encoded.decode('utf-8')
+                    break
+                except UnicodeDecodeError:
+                    encoded = encoded[:-1]
+            char_truncated = True
         
-        # Write UTF-8 data
+        self._write_uint32(offset, len(encoded))
         self.shm.buf[offset+4:offset+4+len(encoded)] = encoded
         
-        return truncated
+        return char_truncated
     
     def _write_array(self, offset: int, value: np.ndarray, field_info: '_FieldInfo') -> bool:
         """Write array, return True if truncated."""
-        # Convert to correct dtype
         value = np.asarray(value, dtype=field_info.array_dtype)
-        
-        # Check if shape matches
         truncated = value.shape != field_info.array_shape
         
-        # Flatten and truncate if necessary
         flat_value = value.flatten()
-        expected_size = int(np.prod(field_info.array_shape))
+        expected_size = field_info.array_flat_size  # Performance: Use pre-cached value
         
         if len(flat_value) > expected_size:
             flat_value = flat_value[:expected_size]
             truncated = True
         elif len(flat_value) < expected_size:
-            # Pad with zeros
             flat_value = np.pad(flat_value, (0, expected_size - len(flat_value)))
         
-        # Write to shared memory
         target = np.ndarray(
             expected_size,
             dtype=field_info.array_dtype,
@@ -805,16 +688,14 @@ class SharedMemory:
         start_time = time.time()
         
         while True:
-            # Try to read with sequence check
             data = self._read_from_slot(0, reset_modified)
             if data is not None:
                 return data
             
-            # Check timeout
             if timeout == 0 or (time.time() - start_time) >= timeout:
                 return None
             
-            time.sleep(0.0001)  # 100 microseconds
+            time.sleep(0.0001)
     
     def _read_fifo(self, timeout: float, latest: bool) -> Optional[Any]:
         """Read from FIFO."""
@@ -823,16 +704,13 @@ class SharedMemory:
         while True:
             write_idx, read_idx, count = self._get_fifo_metadata()
             
-            # Check if data available
             if count == 0:
                 if timeout == 0 or (time.time() - start_time) >= timeout:
                     return None
                 time.sleep(0.0001)
                 continue
             
-            # Determine which slot to read
             if latest and count > 1:
-                # Skip to most recent, discard older
                 read_idx = write_idx - 1
                 count = 1
             
@@ -840,11 +718,9 @@ class SharedMemory:
             data = self._read_from_slot(slot_idx, False)
             
             if data is None:
-                # Retry
                 time.sleep(0.0001)
                 continue
             
-            # Advance read pointer
             read_idx += 1
             count -= 1
             self._set_fifo_metadata(write_idx, read_idx, count)
@@ -855,22 +731,18 @@ class SharedMemory:
         """Read from slot with sequence check."""
         offset = self._get_slot_offset(slot_idx)
         
-        # Read seq_begin
         seq_begin = self._read_uint64(offset)
-        
-        # Get status array offset
         status_offset = offset + 8
         
-        # Read all fields and status
-        field_values = {}
+        # Performance: Reuse dict and pooled objects instead of allocating new ones
+        self._read_dict.clear()
         for idx, field_info in enumerate(self._layout.fields):
             field_offset = offset + field_info.offset
             
-            # Read status byte
             status_byte = self.shm.buf[status_offset + idx]
-            status = FieldStatus(status_byte)
+            status_obj = self._field_status_pool[idx]
+            status_obj._update(status_byte)
             
-            # Read value
             if field_info.is_scalar:
                 value = self._read_scalar(field_offset, field_info.field_type)
             elif field_info.is_string:
@@ -878,26 +750,29 @@ class SharedMemory:
             elif field_info.is_array:
                 value = self._read_array(field_offset, field_info)
             
-            # Wrap in ValueWithStatus
-            field_values[field_info.name] = ValueWithStatus(value, status)
+            wrapper = self._value_status_pool[idx]
+            wrapper._update(value, status_obj)
+            self._read_dict[field_info.name] = wrapper
         
-        # Read seq_end
         seq_end_offset = offset + self._slot_size - 8
         seq_end = self._read_uint64(seq_end_offset)
         
-        # Check consistency
         if seq_begin != seq_end:
             return None
         
-        # Reset modified flags if requested
         if reset_modified:
             for idx in range(len(self._layout.fields)):
                 status_byte = self.shm.buf[status_offset + idx]
                 status_byte &= ~FieldStatus.MASK_MODIFIED
                 self.shm.buf[status_offset + idx] = status_byte
         
-        # Create dataclass instance
-        return self.dataclass_type(**field_values)
+        # Check if at least one field is valid (not unwritten)
+        # If all fields are unwritten, return None (no data available yet)
+        has_valid_data = any(not wrapper._status.is_unwritten for wrapper in self._read_dict.values())
+        if not has_valid_data:
+            return None
+        
+        return self.dataclass_type(**self._read_dict)
     
     def _read_scalar(self, offset: int, field_type: Type) -> Any:
         """Read scalar value."""
@@ -910,24 +785,19 @@ class SharedMemory:
     
     def _read_string(self, offset: int, field_info: '_FieldInfo') -> str:
         """Read UTF-8 string."""
-        # Read length
         length = self._read_uint32(offset)
-        
-        # Read UTF-8 bytes
         encoded = bytes(self.shm.buf[offset+4:offset+4+length])
-        
-        # Decode
         return encoded.decode('utf-8', errors='ignore')
     
     def _read_array(self, offset: int, field_info: '_FieldInfo') -> np.ndarray:
         """Read array."""
-        size = int(np.prod(field_info.array_shape))
+        size = field_info.array_flat_size  # Performance: Use pre-cached value
         flat_array = np.ndarray(
             size,
             dtype=field_info.array_dtype,
             buffer=self.shm.buf,
             offset=offset
-        ).copy()  # Copy to avoid shared memory reference
+        ).copy()
         
         return flat_array.reshape(field_info.array_shape)
 
@@ -956,27 +826,47 @@ class _SharedMemoryLayout:
     def _calculate_layout(self):
         """Calculate offsets and total size."""
         num_fields = len(self.fields)
-        
-        # Header: seq_begin (8) + status_bytes (num_fields)
         offset = 8 + num_fields
-        
-        # Align to 8 bytes
         offset = (offset + 7) // 8 * 8
         
-        # Fields
         for field_info in self.fields:
             field_info.offset = offset
             offset += field_info.size
         
-        # Footer: seq_end (8)
         offset += 8
-        
-        # Align to 8 bytes
         self.total_size = (offset + 7) // 8 * 8
+    
+    def to_dict(self) -> dict:
+        """Serialize to dictionary for pickling."""
+        return {
+            'fields': [f.to_dict() for f in self.fields],
+            'total_size': self.total_size
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict, dataclass_type: Type) -> '_SharedMemoryLayout':
+        """Deserialize from dictionary."""
+        layout = cls.__new__(cls)
+        layout.dataclass_type = dataclass_type
+        layout.fields = [_FieldInfo.from_dict(f) for f in data['fields']]
+        layout.total_size = data['total_size']
+        return layout
 
 
 class _FieldInfo:
-    """Information about a dataclass field."""
+    """
+    Information about a dataclass field.
+    
+    Notes
+    -----
+    Arrays are treated as atomic units:
+    - The entire array shares ONE status byte
+    - Modifying any element marks the whole array as modified
+    - Padding with zeros fills to expected shape but is still valid
+    
+    For per-element status tracking, use multiple separate fields or
+    multiple SharedMemory instances.
+    """
     
     def __init__(self, name: str, field_type: Any, default: Any):
         self.name = name
@@ -986,8 +876,10 @@ class _FieldInfo:
         self.is_string = False
         self.is_array = False
         self.string_max_chars = 0
+        self.string_max_bytes = 0  # Vorcachen
         self.array_dtype = None
         self.array_shape = None
+        self.array_flat_size = 0  # Vorcachen
         self.size = 0
         self.offset = 0
         
@@ -997,29 +889,23 @@ class _FieldInfo:
         """Determine field properties."""
         annotation = str(self.field_type)
         
-        # Check for string
         string_chars = _AnnotationParser.parse_string(annotation)
         if string_chars:
             self.is_string = True
             self.string_max_chars = string_chars
-            # 4 bytes for length + max_chars * 4 bytes for UTF-8
-            self.size = 4 + string_chars * 4
+            self.string_max_bytes = string_chars * 4  # Vorcachen für Performance
+            self.size = 4 + self.string_max_bytes
             return
         
-        # Check for array
         array_info = _AnnotationParser.parse_array(annotation)
         if array_info:
             self.is_array = True
             self.array_dtype, self.array_shape = array_info
-            self.size = int(np.prod(self.array_shape)) * np.dtype(self.array_dtype).itemsize
+            self.array_flat_size = int(np.prod(self.array_shape))  # Vorcachen für Performance
+            self.size = self.array_flat_size * np.dtype(self.array_dtype).itemsize
             return
         
-        # Scalar types
-        type_sizes = {
-            float: 8,  # float64
-            int: 4,    # int32
-            bool: 1,
-        }
+        type_sizes = {float: 8, int: 4, bool: 1}
         
         if self.field_type in type_sizes:
             self.is_scalar = True
@@ -1027,6 +913,57 @@ class _FieldInfo:
             return
         
         raise ValueError(f"Unsupported type for field '{self.name}': {self.field_type}")
+    
+    def to_dict(self) -> dict:
+        """Serialize to dictionary."""
+        return {
+            'name': self.name,
+            'field_type': self.field_type.__name__ if hasattr(self.field_type, '__name__') else str(self.field_type),
+            'is_scalar': self.is_scalar,
+            'is_string': self.is_string,
+            'is_array': self.is_array,
+            'string_max_chars': self.string_max_chars,
+            'string_max_bytes': self.string_max_bytes,  # Neu
+            'array_dtype': np.dtype(self.array_dtype).name if self.array_dtype else None,
+            'array_shape': self.array_shape,
+            'array_flat_size': self.array_flat_size,  # Neu
+            'size': self.size,
+            'offset': self.offset
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> '_FieldInfo':
+        """Deserialize from dictionary."""
+        field_info = cls.__new__(cls)
+        field_info.name = data['name']
+        
+        # Reconstruct field_type safely
+        type_name = data['field_type']
+        type_map = {'float': float, 'int': int, 'bool': bool}
+        field_info.field_type = type_map.get(type_name, str)  # ← GEÄNDERT: Fallback zu str statt eval
+        
+        field_info.is_scalar = data['is_scalar']
+        field_info.is_string = data['is_string']
+        field_info.is_array = data['is_array']
+        field_info.string_max_chars = data['string_max_chars']
+        field_info.string_max_bytes = data.get('string_max_bytes', data['string_max_chars'] * 4)  # Backwards compatibility
+        
+        if data['array_dtype']:
+            # Parse numpy dtype string safely
+            dtype_str = data['array_dtype'].replace('dtype(', '').replace(')', '').strip("'\"")
+            field_info.array_dtype = np.dtype(dtype_str)  # ← numpy.dtype() ist sicher!
+        else:
+            field_info.array_dtype = None
+        
+        field_info.array_shape = data['array_shape']
+        field_info.array_flat_size = data.get('array_flat_size', 0)  # Backwards compatibility
+        if field_info.array_flat_size == 0 and field_info.array_shape:
+            field_info.array_flat_size = int(np.prod(field_info.array_shape))
+        field_info.size = data['size']
+        field_info.offset = data['offset']
+        field_info.default = None
+        
+        return field_info
 
 
 class _AnnotationParser:
@@ -1047,134 +984,13 @@ class _AnnotationParser:
         
         dtype_str, shape_str = match.groups()
         
-        # Parse dtype
         dtype_map = {
-            'float32': np.float32,
-            'float64': np.float64,
-            'int8': np.int8,
-            'int16': np.int16,
-            'int32': np.int32,
-            'int64': np.int64,
-            'uint8': np.uint8,
-            'uint16': np.uint16,
-            'uint32': np.uint32,
-            'uint64': np.uint64,
+            'float32': np.float32, 'float64': np.float64,
+            'int8': np.int8, 'int16': np.int16, 'int32': np.int32, 'int64': np.int64,
+            'uint8': np.uint8, 'uint16': np.uint16, 'uint32': np.uint32, 'uint64': np.uint64,
             'bool': np.bool_,
         }
         dtype = dtype_map.get(dtype_str, np.float64)
-        
-        # Parse shape
         shape = tuple(int(x) for x in shape_str.split(','))
         
         return dtype, shape
-
-
-# === EXAMPLE USAGE ===
-if __name__ == "__main__":
-    from multiprocessing import Process
-    import time
-    
-    # Define status dataclass (no status fields needed!)
-    @dataclass
-    class ControllerStatus:
-        position: float = 0.0
-        velocity: float = 0.0
-        target: float = 0.0
-        error: float = 0.0
-        timestamp: float = 0.0
-        mode: int = 0
-        is_active: bool = False
-        message: "str[64]" = ""
-        image: "float32[10,10]" = None
-    
-    # === SINGLE-SLOT EXAMPLE ===
-    def single_slot_writer():
-        shm = SharedMemory(ControllerStatus, name="single_test", create=True, slots=1)
-        
-        for i in range(20):
-            shm.write(
-                position=i * 0.1,
-                velocity=i * 0.05,
-                timestamp=time.time(),
-                is_active=True,
-                message=f"Iteration {i}",
-                image=np.random.rand(10, 10).astype(np.float32)
-            )
-            time.sleep(0.1)
-        
-        shm.close()
-        shm.unlink()
-    
-    def single_slot_reader():
-        time.sleep(0.05)
-        shm = SharedMemory(ControllerStatus, name="single_test", create=False, slots=1)
-        
-        for _ in range(20):
-            data = shm.read(timeout=1.0, reset_modified=True)
-            if data:
-                pos = data.position
-                msg = data.message
-                print(f"Single: pos={pos.value:.2f}, msg={msg.value}, "
-                      f"pos_modified={pos.modified}, msg_valid={msg.valid}")
-            time.sleep(0.1)
-        
-        shm.close()
-    
-    # === FIFO EXAMPLE ===
-    def fifo_writer():
-        fifo = SharedMemory(ControllerStatus, name="fifo_test", create=True, slots=5)
-        
-        for i in range(30):
-            fifo.write(
-                position=i * 0.1,
-                velocity=i * 0.05,
-                timestamp=time.time(),
-                message=f"FIFO {i}"
-            )
-            fifo.finalize()
-            time.sleep(0.05)
-        
-        fifo.close()
-        fifo.unlink()
-    
-    def fifo_reader():
-        time.sleep(0.1)
-        fifo = SharedMemory(ControllerStatus, name="fifo_test", create=False, slots=5)
-        
-        # Read all
-        print("\n=== Reading all ===")
-        for _ in range(15):
-            data = fifo.read(timeout=0.5, latest=False)
-            if data:
-                pos = data.position
-                msg = data.message
-                print(f"FIFO: pos={pos.value:.2f}, msg={msg.value}, modified={pos.modified}")
-            time.sleep(0.15)
-        
-        # Read only latest
-        print("\n=== Reading latest only ===")
-        for _ in range(5):
-            data = fifo.read(timeout=0.5, latest=True)
-            if data:
-                pos = data.position
-                print(f"Latest: pos={pos.value:.2f}, modified={pos.modified}")
-            time.sleep(0.2)
-        
-        fifo.close()
-    
-    # Run examples
-    print("=== SINGLE-SLOT EXAMPLE ===")
-    p1 = Process(target=single_slot_writer)
-    p2 = Process(target=single_slot_reader)
-    p1.start()
-    p2.start()
-    p1.join()
-    p2.join()
-    
-    print("\n\n=== FIFO EXAMPLE ===")
-    p3 = Process(target=fifo_writer)
-    p4 = Process(target=fifo_reader)
-    p3.start()
-    p4.start()
-    p3.join()
-    p4.join()

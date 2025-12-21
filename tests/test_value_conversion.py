@@ -6,37 +6,29 @@ Tests cover:
 - Status properties (valid, modified, truncated, unwritten)
 - Magic method conversions (float, int, str, array)
 - Arithmetic operations
+- MULTIPROCESSING where SharedMemory is involved with auto-detection
 """
 
 import pytest
 import numpy as np
 from dataclasses import dataclass
 import time
+import multiprocessing
+from multiprocessing import Queue
+import sys
 
 from flexible_shared_memory import SharedMemory, ValueWithStatus, FieldStatus
 
 
-# Test fixtures
 @pytest.fixture
 def unique_name():
     """Generate unique name for each test."""
     return f"test_shm_{time.time_ns()}"
 
 
-@pytest.fixture
-def cleanup_list():
-    """Track SharedMemory instances for cleanup."""
-    instances = []
-    yield instances
-    for shm in instances:
-        try:
-            shm.close()
-            shm.unlink()
-        except:
-            pass
+PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spawn"]
 
 
-# Test dataclasses
 @dataclass
 class ScalarData:
     temperature: float = 0.0
@@ -54,257 +46,510 @@ class ArrayData:
     data: "float64[10]" = None
 
 
-# Value property tests
+# Helper functions
+def write_float(name: str, value: float, queue: Queue):
+    """Write float value."""
+    try:
+        shm = SharedMemory(ScalarData, name=name)
+        shm.write(temperature=value)
+        shm.close()
+        queue.put(("success", value))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def write_int(name: str, value: int, queue: Queue):
+    """Write int value."""
+    try:
+        shm = SharedMemory(ScalarData, name=name)
+        shm.write(count=value)
+        shm.close()
+        queue.put(("success", value))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def write_bool(name: str, value: bool, queue: Queue):
+    """Write bool value."""
+    try:
+        shm = SharedMemory(ScalarData, name=name)
+        shm.write(active=value)
+        shm.close()
+        queue.put(("success", value))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def write_string(name: str, msg: str, queue: Queue):
+    """Write string value."""
+    try:
+        shm = SharedMemory(StringData, name=name)
+        shm.write(message=msg)
+        shm.close()
+        queue.put(("success", msg))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def write_array(name: str, queue: Queue):
+    """Write array value."""
+    try:
+        arr = np.arange(10, dtype=np.float64)
+        shm = SharedMemory(ArrayData, name=name)
+        shm.write(data=arr)
+        shm.close()
+        queue.put(("success", arr.tolist()))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
 class TestValueProperty:
     """Test .value property access."""
     
-    def test_value_property_float(self, unique_name, cleanup_list):
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_value_property_float(self, unique_name, start_method):
         """Test accessing float value via .value property."""
+        ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        shm.write(temperature=23.5)
-        data = shm.read(timeout=0)
-        
-        # Access via .value
-        temp_value = data.temperature.value
-        assert isinstance(temp_value, float)
-        assert abs(temp_value - 23.5) < 1e-10
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_float, args=(unique_name, 23.5, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            data = shm.read(timeout=0)
+            temp_value = data.temperature.value
+            assert isinstance(temp_value, float)
+            assert abs(temp_value - 23.5) < 1e-10
+        finally:
+            shm.close()
+            shm.unlink()
     
-    def test_value_property_int(self, unique_name, cleanup_list):
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_value_property_int(self, unique_name, start_method):
         """Test accessing int value via .value property."""
+        ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        shm.write(count=42)
-        data = shm.read(timeout=0)
-        
-        count_value = data.count.value
-        assert isinstance(count_value, int)
-        assert count_value == 42
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_int, args=(unique_name, 42, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            data = shm.read(timeout=0)
+            count_value = data.count.value
+            assert isinstance(count_value, int)
+            assert count_value == 42
+        finally:
+            shm.close()
+            shm.unlink()
     
-    def test_value_property_bool(self, unique_name, cleanup_list):
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_value_property_bool(self, unique_name, start_method):
         """Test accessing bool value via .value property."""
+        ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        shm.write(active=True)
-        data = shm.read(timeout=0)
-        
-        active_value = data.active.value
-        assert isinstance(active_value, bool)
-        assert active_value is True
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_bool, args=(unique_name, True, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            data = shm.read(timeout=0)
+            active_value = data.active.value
+            assert isinstance(active_value, bool)
+            assert active_value is True
+        finally:
+            shm.close()
+            shm.unlink()
     
-    def test_value_property_string(self, unique_name, cleanup_list):
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_value_property_string(self, unique_name, start_method):
         """Test accessing string value via .value property."""
+        ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(StringData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        shm.write(message="Hello World")
-        data = shm.read(timeout=0)
-        
-        msg_value = data.message.value
-        assert isinstance(msg_value, str)
-        assert msg_value == "Hello World"
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_string, args=(unique_name, "Hello", queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            data = shm.read(timeout=0)
+            msg_value = data.message.value
+            assert isinstance(msg_value, str)
+            assert msg_value == "Hello"
+        finally:
+            shm.close()
+            shm.unlink()
     
-    def test_value_property_array(self, unique_name, cleanup_list):
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_value_property_array(self, unique_name, start_method):
         """Test accessing array value via .value property."""
+        ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(ArrayData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        arr = np.arange(10, dtype=np.float64)
-        shm.write(data=arr)
-        data = shm.read(timeout=0)
-        
-        arr_value = data.data.value
-        assert isinstance(arr_value, np.ndarray)
-        np.testing.assert_array_equal(arr_value, arr)
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_array, args=(unique_name, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            data = shm.read(timeout=0)
+            arr_value = data.data.value
+            assert isinstance(arr_value, np.ndarray)
+            expected = np.arange(10, dtype=np.float64)
+            np.testing.assert_array_equal(arr_value, expected)
+        finally:
+            shm.close()
+            shm.unlink()
 
 
-# Status property tests
-class TestStatusProperties:
-    """Test status properties on ValueWithStatus."""
-    
-    def test_valid_property(self, unique_name, cleanup_list):
-        """Test .valid property access."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
-        
-        shm.write(temperature=1.0)
-        data = shm.read(timeout=0)
-        
-        assert data.temperature.valid is True
-        assert data.count.valid is False  # Unwritten
-    
-    def test_modified_property(self, unique_name, cleanup_list):
-        """Test .modified property access."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
-        
-        shm.write(temperature=1.0)
-        data = shm.read(timeout=0)
-        
-        assert data.temperature.modified is True
-        assert data.count.modified is False
-    
-    def test_truncated_property(self, unique_name, cleanup_list):
-        """Test .truncated property access."""
-        shm = SharedMemory(StringData, name=unique_name, create=True)
-        cleanup_list.append(shm)
-        
-        shm.write(message="a" * 50)  # Truncated
-        data = shm.read(timeout=0)
-        
-        assert data.message.truncated is True
-    
-    def test_unwritten_property(self, unique_name, cleanup_list):
-        """Test .unwritten property access."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
-        
-        data = shm.read(timeout=0)
-        if data is not None:
-            assert data.temperature.unwritten is True
-
-
-# Magic method conversion tests
 class TestMagicConversions:
     """Test magic method conversions."""
     
-    def test_float_conversion(self, unique_name, cleanup_list):
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_float_conversion(self, unique_name, start_method):
         """Test float() magic method."""
+        ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        shm.write(temperature=23.5)
-        data = shm.read(timeout=0)
-        
-        # Convert using float()
-        temp = float(data.temperature)
-        assert isinstance(temp, float)
-        assert abs(temp - 23.5) < 1e-10
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_float, args=(unique_name, 23.5, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            data = shm.read(timeout=0)
+            temp = float(data.temperature)
+            assert isinstance(temp, float)
+            assert abs(temp - 23.5) < 1e-10
+        finally:
+            shm.close()
+            shm.unlink()
     
-    def test_int_conversion(self, unique_name, cleanup_list):
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_int_conversion(self, unique_name, start_method):
         """Test int() magic method."""
+        ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        shm.write(count=42)
-        data = shm.read(timeout=0)
-        
-        # Convert using int()
-        count = int(data.count)
-        assert isinstance(count, int)
-        assert count == 42
-    
-    def test_bool_conversion(self, unique_name, cleanup_list):
-        """Test bool() magic method."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
-        
-        shm.write(active=True)
-        data = shm.read(timeout=0)
-        
-        # Convert using bool()
-        active = bool(data.active)
-        assert isinstance(active, bool)
-        assert active is True
-    
-    def test_str_conversion(self, unique_name, cleanup_list):
-        """Test str() magic method."""
-        shm = SharedMemory(StringData, name=unique_name, create=True)
-        cleanup_list.append(shm)
-        
-        shm.write(message="Test")
-        data = shm.read(timeout=0)
-        
-        # Convert using str()
-        msg = str(data.message)
-        assert isinstance(msg, str)
-        assert msg == "Test"
-    
-    def test_array_conversion(self, unique_name, cleanup_list):
-        """Test np.array() magic method."""
-        shm = SharedMemory(ArrayData, name=unique_name, create=True)
-        cleanup_list.append(shm)
-        
-        arr = np.arange(10, dtype=np.float64)
-        shm.write(data=arr)
-        data = shm.read(timeout=0)
-        
-        # Convert using np.array()
-        arr_copy = np.array(data.data)
-        assert isinstance(arr_copy, np.ndarray)
-        np.testing.assert_array_equal(arr_copy, arr)
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_int, args=(unique_name, 42, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            data = shm.read(timeout=0)
+            count = int(data.count)
+            assert isinstance(count, int)
+            assert count == 42
+        finally:
+            shm.close()
+            shm.unlink()
 
 
-# Arithmetic operation tests
 class TestArithmeticOperations:
     """Test arithmetic operations on ValueWithStatus."""
     
-    def test_addition(self, unique_name, cleanup_list):
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_addition(self, unique_name, start_method):
         """Test addition operation."""
+        ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        shm.write(temperature=20.0)
-        data = shm.read(timeout=0)
-        
-        result = data.temperature + 5.0
-        assert abs(result - 25.0) < 1e-10
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_float, args=(unique_name, 20.0, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            data = shm.read(timeout=0)
+            result = data.temperature + 5.0
+            assert abs(result - 25.0) < 1e-10
+        finally:
+            shm.close()
+            shm.unlink()
     
-    def test_subtraction(self, unique_name, cleanup_list):
-        """Test subtraction operation."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
-        
-        shm.write(temperature=30.0)
-        data = shm.read(timeout=0)
-        
-        result = data.temperature - 10.0
-        assert abs(result - 20.0) < 1e-10
-    
-    def test_multiplication(self, unique_name, cleanup_list):
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_multiplication(self, unique_name, start_method):
         """Test multiplication operation."""
+        ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        shm.write(count=5)
-        data = shm.read(timeout=0)
-        
-        result = data.count * 3
-        assert result == 15
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_int, args=(unique_name, 5, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            data = shm.read(timeout=0)
+            result = data.count * 3
+            assert result == 15
+        finally:
+            shm.close()
+            shm.unlink()
+
+class TestStatusFlags:
+    """Test status flag behavior in detail."""
     
-    def test_division(self, unique_name, cleanup_list):
-        """Test division operation."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_truncated_flag_string(self, unique_name, start_method):
+        """Test truncated flag is set when string is truncated."""
         
-        shm.write(temperature=100.0)
-        data = shm.read(timeout=0)
+        @dataclass
+        class ShortString:
+            msg: "str[5]" = ""  # Only 5 chars max
         
-        result = data.temperature / 4.0
-        assert abs(result - 25.0) < 1e-10
+        shm = SharedMemory(ShortString, name=unique_name, create=True)
+        
+        try:
+            # Write string longer than 5 chars
+            long_string = "This is a very long message"
+            shm.write(msg=long_string)
+            
+            data = shm.read(timeout=0)
+            assert data is not None
+            
+            # Should be truncated
+            assert data.msg.truncated, "String should be marked as truncated"
+            assert not data.msg.valid, "Truncated data should not be valid"
+            assert data.msg.modified, "Should be marked as modified"
+            assert not data.msg.unwritten, "Should not be unwritten"
+            
+            # Value should be truncated to 5 chars
+            assert len(data.msg.value) == 5, f"Expected 5 chars, got {len(data.msg.value)}"
+        finally:
+            shm.close()
+            shm.unlink()
     
-    def test_chained_operations(self, unique_name, cleanup_list):
-        """Test chained arithmetic operations."""
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_truncated_flag_array(self, unique_name, start_method):
+        """Test truncated flag is set when array is truncated."""
+        
+        @dataclass
+        class SmallArray:
+            data: "float64[5]" = None  # Only 5 elements
+        
+        shm = SharedMemory(SmallArray, name=unique_name, create=True)
+        
+        try:
+            # Write array with 10 elements (more than 5)
+            large_array = np.arange(10, dtype=np.float64)
+            shm.write(data=large_array)
+            
+            data = shm.read(timeout=0)
+            assert data is not None
+            
+            # Should be truncated
+            assert data.data.truncated, "Array should be marked as truncated"
+            assert not data.data.valid, "Truncated data should not be valid"
+            
+            # Should have only 5 elements
+            assert len(data.data.value) == 5
+        finally:
+            shm.close()
+            shm.unlink()
+    
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_unwritten_flag(self, unique_name, start_method):
+        """Test unwritten flag for fields that were never written."""
         shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
         
-        shm.write(temperature=10.0)
-        data = shm.read(timeout=0)
+        try:
+            # Write only temperature, leave count and active unwritten
+            shm.write(temperature=25.0)
+            
+            data = shm.read(timeout=0)
+            assert data is not None
+            
+            # Temperature was written
+            assert not data.temperature.unwritten, "Written field should not be unwritten"
+            assert data.temperature.valid, "Written field should be valid"
+            assert data.temperature.modified, "Written field should be modified"
+            
+            # Count and active were NOT written
+            assert data.count.unwritten, "Unwritten field should have unwritten flag"
+            assert not data.count.valid, "Unwritten field should not be valid"
+            assert not data.count.modified, "Unwritten field should not be modified"
+            
+            assert data.active.unwritten, "Unwritten field should have unwritten flag"
+            assert not data.active.valid, "Unwritten field should not be valid"
+        finally:
+            shm.close()
+            shm.unlink()
+    
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_overflow_flag_in_fifo(self, unique_name, start_method):
+        """Test overflow flag is set when FIFO overflows."""
+        fifo = SharedMemory(ScalarData, name=unique_name, create=True, slots=2)
         
-        result = (data.temperature + 5) * 2 - 10
-        assert abs(result - 20.0) < 1e-10
+        try:
+            # Write 4 values to 2-slot FIFO (causes overflow)
+            for i in range(4):
+                fifo.write(temperature=float(i), count=i)
+                fifo.finalize()
+            
+            # Read remaining values (should be 2, 3)
+            data1 = fifo.read(timeout=1.0)
+            assert data1 is not None
+            assert data1.temperature.overflow, "Field should have overflow flag after FIFO overflow"
+            assert data1.count.overflow, "All fields should have overflow flag"
+            
+            data2 = fifo.read(timeout=1.0)
+            assert data2 is not None
+            assert data2.temperature.overflow, "Second item should also have overflow flag"
+        finally:
+            fifo.close()
+            fifo.unlink()
+    
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_valid_property_combines_flags(self, unique_name, start_method):
+        """Test that valid property is false when truncated OR unwritten."""
+        
+        @dataclass
+        class MixedData:
+            good: float = 0.0
+            short: "str[3]" = ""
+            unset: int = 0
+        
+        shm = SharedMemory(MixedData, name=unique_name, create=True)
+        
+        try:
+            # Write good field normally, short field with truncation, leave unset unwritten
+            shm.write(good=42.0, short="toolong")
+            
+            data = shm.read(timeout=0)
+            assert data is not None
+            
+            # good: valid (not truncated, not unwritten)
+            assert data.good.valid, "Normal field should be valid"
+            assert not data.good.truncated
+            assert not data.good.unwritten
+            
+            # short: NOT valid (truncated)
+            assert not data.short.valid, "Truncated field should not be valid"
+            assert data.short.truncated
+            assert not data.short.unwritten
+            
+            # unset: NOT valid (unwritten)
+            assert not data.unset.valid, "Unwritten field should not be valid"
+            assert not data.unset.truncated
+            assert data.unset.unwritten
+        finally:
+            shm.close()
+            shm.unlink()
+    
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_modified_flag_cleared_after_reset(self, unique_name, start_method):
+        """Test that modified flag is cleared by reset_modified=True."""
+        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        
+        try:
+            # Write data
+            shm.write(temperature=25.0, count=10)
+            
+            # Read without reset
+            data1 = shm.read(timeout=0, reset_modified=False)
+            assert data1 is not None
+            assert data1.temperature.modified, "Should be modified after write"
+            assert data1.count.modified, "Should be modified after write"
+            
+            # Read again without reset - still modified
+            data2 = shm.read(timeout=0, reset_modified=False)
+            assert data2 is not None
+            assert data2.temperature.modified, "Should still be modified"
+            
+            # Read with reset
+            data3 = shm.read(timeout=0, reset_modified=True)
+            assert data3 is not None
+            assert data3.temperature.modified, "Should be modified DURING this read"
+            
+            # Read again - now NOT modified
+            data4 = shm.read(timeout=0, reset_modified=False)
+            assert data4 is not None
+            assert not data4.temperature.modified, "Should not be modified after reset"
+            assert not data4.count.modified, "Should not be modified after reset"
+        finally:
+            shm.close()
+            shm.unlink()
+    
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_flag_combinations(self, unique_name, start_method):
+        """Test various flag combinations work correctly."""
+        
+        @dataclass
+        class FlagTest:
+            normal: float = 0.0
+            truncated_field: "str[2]" = ""
+            unwritten_field: int = 0
+        
+        shm = SharedMemory(FlagTest, name=unique_name, create=True)
+        
+        try:
+            # First write: normal + truncated, leave unwritten
+            shm.write(normal=1.0, truncated_field="abc")
+            
+            data = shm.read(timeout=0)
+            
+            # normal: valid=True, modified=True, truncated=False, unwritten=False
+            assert data.normal.valid
+            assert data.normal.modified
+            assert not data.normal.truncated
+            assert not data.normal.unwritten
+            
+            # truncated_field: valid=False, modified=True, truncated=True, unwritten=False
+            assert not data.truncated_field.valid
+            assert data.truncated_field.modified
+            assert data.truncated_field.truncated
+            assert not data.truncated_field.unwritten
+            
+            # unwritten_field: valid=False, modified=False, truncated=False, unwritten=True
+            assert not data.unwritten_field.valid
+            assert not data.unwritten_field.modified
+            assert not data.unwritten_field.truncated
+            assert data.unwritten_field.unwritten
+        finally:
+            shm.close()
+            shm.unlink()
 
 
-# ValueWithStatus class tests
 class TestValueWithStatusClass:
-    """Test ValueWithStatus class directly."""
+    """Test ValueWithStatus class directly (unit tests)."""
     
     def test_create_value_with_status(self):
         """Test creating ValueWithStatus instance."""
-        status = FieldStatus(0b00000100)  # Only modified
+        status = FieldStatus(0b00000100)
         wrapper = ValueWithStatus(42.0, status)
         
         assert wrapper.value == 42.0
@@ -313,93 +558,65 @@ class TestValueWithStatusClass:
         assert not wrapper.truncated
         assert not wrapper.unwritten
     
-    def test_repr(self):
-        """Test __repr__ output."""
-        status = FieldStatus(0b00000100)
-        wrapper = ValueWithStatus(3.14, status)
-        
-        repr_str = repr(wrapper)
-        assert "ValueWithStatus" in repr_str
-        assert "3.14" in repr_str
-        assert "valid=True" in repr_str or "valid" in repr_str
-    
     def test_with_different_types(self):
         """Test ValueWithStatus with various value types."""
         status = FieldStatus(0b00000100)
         
-        # Float
         wrapper_float = ValueWithStatus(1.5, status)
         assert float(wrapper_float) == 1.5
         
-        # Int
         wrapper_int = ValueWithStatus(42, status)
         assert int(wrapper_int) == 42
         
-        # String
         wrapper_str = ValueWithStatus("test", status)
         assert str(wrapper_str) == "test"
         
-        # Array
         arr = np.array([1, 2, 3])
         wrapper_arr = ValueWithStatus(arr, status)
         np.testing.assert_array_equal(np.array(wrapper_arr), arr)
 
-
-# Practical usage tests
-class TestPracticalUsage:
-    """Test practical usage patterns."""
+    def test_bool_conversion(self):
+        """Test bool() magic method."""
+        status = FieldStatus(0b00000100)
+        
+        # Truthy value
+        wrapper_true = ValueWithStatus(42.0, status)
+        assert bool(wrapper_true) is True
+        
+        # Falsy value
+        wrapper_false = ValueWithStatus(0.0, status)
+        assert bool(wrapper_false) is False
+        
+        wrapper_empty_str = ValueWithStatus("", status)
+        assert bool(wrapper_empty_str) is False
     
-    def test_conditional_processing(self, unique_name, cleanup_list):
-        """Test typical conditional processing pattern."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
+    def test_repr(self):
+        """Test __repr__ method."""
+        status = FieldStatus(0b00000100)  # modified
+        wrapper = ValueWithStatus(42.5, status)
         
-        shm.write(temperature=25.5, count=10)
-        data = shm.read(timeout=0)
-        
-        # Typical usage pattern
-        temp = data.temperature
-        if temp.valid and temp.modified:
-            value = temp.value
-            assert abs(value - 25.5) < 1e-10
+        repr_str = repr(wrapper)
+        assert "ValueWithStatus" in repr_str
+        assert "42.5" in repr_str
+        assert "valid=True" in repr_str
+        assert "modified=True" in repr_str
     
-    def test_value_and_status_access(self, unique_name, cleanup_list):
-        """Test accessing both value and status."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
+    def test_subtraction(self):
+        """Test subtraction operation."""
+        status = FieldStatus(0b00000100)
+        wrapper = ValueWithStatus(10.0, status)
         
-        shm.write(temperature=30.0)
-        data = shm.read(timeout=0)
-        
-        temp = data.temperature
-        value = temp.value
-        is_valid = temp.valid
-        is_modified = temp.modified
-        
-        assert abs(value - 30.0) < 1e-10
-        assert is_valid
-        assert is_modified
+        result = wrapper - 3.0
+        assert result == 7.0
     
-    def test_direct_arithmetic_usage(self, unique_name, cleanup_list):
-        """Test using value directly in arithmetic."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
-        cleanup_list.append(shm)
+    def test_division(self):
+        """Test division operation."""
+        status = FieldStatus(0b00000100)
+        wrapper = ValueWithStatus(20.0, status)
         
-        shm.write(temperature=20.0, count=5)
-        data = shm.read(timeout=0)
-        
-        # Use in calculations
-        if data.temperature.valid:
-            celsius = data.temperature.value
-            fahrenheit = celsius * 9/5 + 32
-            assert abs(fahrenheit - 68.0) < 1e-10
-        
-        if data.count.valid:
-            total = data.count.value * 2
-            assert total == 10
+        result = wrapper / 4.0
+        assert result == 5.0
 
 
-# Manual test execution
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-    

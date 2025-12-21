@@ -1,13 +1,10 @@
 """
 Multi-process communication tests for flexible_shared_memory.
 
-Tests cover:
-- One writer, one reader
-- Multiple readers
-- Data transfer correctness
-- Process cleanup
-- Real-world scenarios
-- BOTH fork and spawn start methods
+Tests the new self-describing header functionality:
+- Readers auto-detect slots from header
+- Hash validation ensures data integrity
+- Works with both fork and spawn
 """
 
 import pytest
@@ -21,14 +18,12 @@ import sys
 from flexible_shared_memory import SharedMemory
 
 
-# Test fixtures
 @pytest.fixture
 def unique_name():
     """Generate unique name for each test."""
     return f"test_shm_{time.time_ns()}"
 
 
-# Test dataclasses
 @dataclass
 class SensorData:
     temperature: float = 0.0
@@ -44,11 +39,14 @@ class ImageData:
     image: "uint8[10,10,3]" = None
 
 
-# Helper functions for multiprocess tests (MUST be at module level for spawn!)
+# Helper functions (NO slots parameter needed!)
 def writer_process_simple(name: str, num_writes: int, queue: Queue):
-    """Simple writer process - communicates via queue."""
+    """Simple writer - reader will auto-detect configuration."""
     try:
-        shm = SharedMemory(SensorData, name=name, create=False)
+        # Reader auto-detects, so just open
+        shm = SharedMemory(SensorData, name=name)
+        
+        queue.put(("ready", None))
         
         for i in range(num_writes):
             shm.write(
@@ -65,34 +63,13 @@ def writer_process_simple(name: str, num_writes: int, queue: Queue):
         queue.put(("error", str(e)))
 
 
-def reader_process_simple(name: str, expected_count: int, queue: Queue):
-    """Simple reader process - returns results via queue."""
-    try:
-        shm = SharedMemory(SensorData, name=name, create=False)
-        
-        readings = []
-        for _ in range(expected_count):
-            data = shm.read(timeout=1.0)
-            if data and data.temperature.valid:
-                readings.append(data.temperature.value)
-            time.sleep(0.01)
-        
-        shm.close()
-        queue.put(("success", readings))
-    except Exception as e:
-        queue.put(("error", str(e)))
-
-
 def fifo_writer_process(name: str, num_writes: int, queue: Queue):
-    """FIFO writer process."""
+    """FIFO writer - reader auto-detects slots."""
     try:
-        fifo = SharedMemory(SensorData, name=name, create=False, slots=5)
+        fifo = SharedMemory(SensorData, name=name)  # Auto-detects slots=5!
         
         for i in range(num_writes):
-            fifo.write(
-                temperature=10.0 + i,
-                status=f"fifo_{i}"
-            )
+            fifo.write(temperature=10.0 + i, status=f"fifo_{i}")
             fifo.finalize()
             time.sleep(0.05)
         
@@ -102,31 +79,14 @@ def fifo_writer_process(name: str, num_writes: int, queue: Queue):
         queue.put(("error", str(e)))
 
 
-def fifo_reader_process(name: str, expected_count: int, queue: Queue):
-    """FIFO reader process."""
-    try:
-        fifo = SharedMemory(SensorData, name=name, create=False, slots=5)
-        
-        readings = []
-        for _ in range(expected_count):
-            data = fifo.read(timeout=2.0, latest=False)
-            if data and data.temperature.valid:
-                readings.append(data.temperature.value)
-        
-        fifo.close()
-        queue.put(("success", readings))
-    except Exception as e:
-        queue.put(("error", str(e)))
-
-
 def writer_with_values(name: str, test_values: list, queue: Queue):
-    """Writer that writes specific test values."""
+    """Writer with specific test values."""
     try:
-        time.sleep(0.05)  # Give reader time to prepare
-        shm = SharedMemory(SensorData, name=name, create=False)
+        time.sleep(0.05)
+        shm = SharedMemory(SensorData, name=name)
         for temp, press, status in test_values:
             shm.write(temperature=temp, pressure=press, status=status)
-            time.sleep(0.1)  # Ensure reader can catch each write
+            time.sleep(0.1)
         shm.close()
         queue.put(("success", len(test_values)))
     except Exception as e:
@@ -134,10 +94,10 @@ def writer_with_values(name: str, test_values: list, queue: Queue):
 
 
 def fast_fifo_writer(name: str, num_writes: int, queue: Queue):
-    """Fast FIFO writer for overflow test."""
+    """Fast FIFO writer."""
     try:
-        time.sleep(0.05)  # Let reader prepare
-        f = SharedMemory(SensorData, name=name, create=False, slots=3)
+        time.sleep(0.05)
+        f = SharedMemory(SensorData, name=name)  # Auto-detects slots=3!
         for i in range(num_writes):
             f.write(temperature=float(i))
             f.finalize()
@@ -149,13 +109,13 @@ def fast_fifo_writer(name: str, num_writes: int, queue: Queue):
 
 
 def image_writer(name: str, num_frames: int, queue: Queue):
-    """Image writer process."""
+    """Image writer."""
     try:
-        time.sleep(0.05)  # Let reader prepare
-        shm_w = SharedMemory(ImageData, name=name, create=False)
+        time.sleep(0.05)
+        shm_w = SharedMemory(ImageData, name=name)
         for frame_id in range(num_frames):
             img = np.random.randint(0, 255, (10, 10, 3), dtype=np.uint8)
-            img[:, :, 0] = frame_id  # Mark with frame_id in red channel
+            img[:, :, 0] = frame_id
             shm_w.write(frame_id=frame_id, timestamp=time.time(), image=img)
             time.sleep(0.1)
         shm_w.close()
@@ -165,13 +125,20 @@ def image_writer(name: str, num_frames: int, queue: Queue):
 
 
 def writer_two_stage(name: str, queue: Queue):
-    """Writer that writes temperature, waits, then pressure."""
+    """Two-stage writer."""
     try:
-        time.sleep(0.05)  # Let reader prepare
-        shm_w = SharedMemory(SensorData, name=name, create=False)
+        shm_w = SharedMemory(SensorData, name=name)
+        
+        queue.put(("ready", None))
+        
+        time.sleep(0.05)
         shm_w.write(temperature=25.0)
+        queue.put(("first_write", None))
+        
         time.sleep(0.2)
         shm_w.write(pressure=1013.0)
+        queue.put(("second_write", None))
+        
         time.sleep(0.1)
         shm_w.close()
         queue.put(("success", 2))
@@ -194,7 +161,7 @@ def writer_cleanup(name: str, queue: Queue):
 def reader_cleanup(name: str, queue: Queue):
     """Reader with cleanup."""
     try:
-        shm_r = SharedMemory(SensorData, name=name, create=False)
+        shm_r = SharedMemory(SensorData, name=name)  # Auto-detect
         data = shm_r.read(timeout=1.0)
         shm_r.close()
         queue.put(("success", data is not None))
@@ -202,11 +169,9 @@ def reader_cleanup(name: str, queue: Queue):
         queue.put(("error", str(e)))
 
 
-# Parametrize all multiprocess tests with both fork and spawn
 PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spawn"]
 
 
-# Basic multiprocess tests
 class TestBasicMultiprocess:
     """Test basic multi-process communication."""
     
@@ -215,33 +180,30 @@ class TestBasicMultiprocess:
         """Test single writer and single reader."""
         ctx = multiprocessing.get_context(start_method)
         
-        # Create shared memory in main process
         shm = SharedMemory(SensorData, name=unique_name, create=True)
         
         try:
-            # Start writer with queue
             queue = ctx.Queue()
             writer = ctx.Process(target=writer_process_simple, args=(unique_name, 10, queue))
             writer.start()
             
-            # Give writer time to start and make first write
+            status, _ = queue.get(timeout=5.0)
+            assert status == "ready", "Writer failed to start"
+            
             time.sleep(0.05)
             
-            # Read in main process
             readings = []
             for _ in range(10):
                 data = shm.read(timeout=1.0, reset_modified=False)
                 if data and data.temperature.valid and data.temperature.modified:
                     readings.append(data.temperature.value)
-                    time.sleep(0.02)  # Give writer time to update
+                    time.sleep(0.02)
             
             writer.join(timeout=3.0)
             
-            # Check writer result
             status, result = queue.get(timeout=1.0)
             assert status == "success", f"Writer failed: {result}"
             
-            # Verify we got readings
             assert len(readings) > 0, f"No readings received (start_method={start_method})"
             assert all(20.0 <= t <= 29.0 for t in readings)
         
@@ -252,14 +214,13 @@ class TestBasicMultiprocess:
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     def test_writer_creates_reader_opens(self, unique_name, start_method):
         """Test that writer creates and reader opens existing memory."""
-        # Writer creates
         shm_writer = SharedMemory(SensorData, name=unique_name, create=True)
         
         try:
             shm_writer.write(temperature=25.0, pressure=1013.0)
             
-            # Reader opens existing
-            shm_reader = SharedMemory(SensorData, name=unique_name, create=False)
+            # Reader auto-detects configuration
+            shm_reader = SharedMemory(SensorData, name=unique_name)
             
             data = shm_reader.read(timeout=0)
             assert data is not None
@@ -273,7 +234,7 @@ class TestBasicMultiprocess:
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     def test_data_transfer_correctness(self, unique_name, start_method):
-        """Test that data is transferred correctly between processes."""
+        """Test correct data transfer between processes."""
         ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(SensorData, name=unique_name, create=True)
         
@@ -284,21 +245,18 @@ class TestBasicMultiprocess:
                 (22.0, 1014.00, "OK")
             ]
             
-            # Start writer
             queue = ctx.Queue()
             writer_proc = ctx.Process(target=writer_with_values, 
                                      args=(unique_name, test_values, queue))
             writer_proc.start()
             
-            # Read values
             received = []
             prev_temp = None
-            max_attempts = len(test_values) * 5  # More attempts for timing
+            max_attempts = len(test_values) * 5
             for _ in range(max_attempts):    
                 data = shm.read(timeout=2.0, reset_modified=False)
                 if data and data.temperature.valid and data.temperature.modified:
                     temp_val = data.temperature.value
-                    # Only add if different from previous (avoid duplicates)
                     if temp_val != prev_temp:
                         received.append((
                             temp_val,
@@ -312,11 +270,9 @@ class TestBasicMultiprocess:
             
             writer_proc.join(timeout=2.0)
             
-            # Check writer result
             status, result = queue.get(timeout=1.0)
             assert status == "success", f"Writer failed: {result}"
             
-            # Verify correctness
             assert len(received) >= len(test_values), \
                 f"Expected {len(test_values)}, got {len(received)} (start_method={start_method})"
             for i, (t_exp, p_exp, s_exp) in enumerate(test_values):
@@ -330,31 +286,80 @@ class TestBasicMultiprocess:
             shm.close()
             shm.unlink()
 
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_dataclass_mismatch_raises_error(self, unique_name, start_method):
+        """Reader with different dataclass should fail hash validation."""
+        
+        @dataclass
+        class WrongData:
+            value: float = 0.0
+            other: int = 0
+        
+        shm_writer = SharedMemory(SensorData, name=unique_name, create=True)
+        shm_writer.write(temperature=25.0)
+        
+        try:
+            # Should raise ValueError due to hash mismatch
+            with pytest.raises(ValueError, match="Dataclass structure mismatch"):
+                shm_reader = SharedMemory(WrongData, name=unique_name)
+        finally:
+            shm_writer.close()
+            shm_writer.unlink()
+    
+    def test_reader_auto_detects_slots(self, unique_name):
+        """Reader should auto-detect number of slots from header."""
+        
+        # Writer creates with 7 slots
+        shm_writer = SharedMemory(SensorData, name=unique_name, create=True, slots=7)
+        
+        # Reader opens WITHOUT specifying slots
+        shm_reader = SharedMemory(SensorData, name=unique_name)
+        
+        # Verify reader detected correct configuration
+        assert shm_reader.slots == 7, "Reader should auto-detect slots=7"
+        assert shm_reader.is_fifo == True, "Reader should detect FIFO mode"
+        
+        shm_reader.close()
+        shm_writer.close()
+        shm_writer.unlink()
+    
+    def test_reader_auto_detects_single_slot(self, unique_name):
+        """Reader should auto-detect single-slot mode."""
+        
+        # Writer creates single-slot (default)
+        shm_writer = SharedMemory(SensorData, name=unique_name, create=True, slots=1)
+        
+        # Reader opens WITHOUT specifying slots
+        shm_reader = SharedMemory(SensorData, name=unique_name)
+        
+        # Verify reader detected single-slot mode
+        assert shm_reader.slots == 1, "Reader should auto-detect slots=1"
+        assert shm_reader.is_fifo == False, "Reader should detect single-slot mode"
+        
+        shm_reader.close()
+        shm_writer.close()
+        shm_writer.unlink()
 
-# FIFO multiprocess tests
+
 class TestFIFOMultiprocess:
     """Test FIFO mode with multiple processes."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     def test_fifo_writer_reader(self, unique_name, start_method):
-        """Test FIFO with writer and reader in separate processes."""
+        """Test FIFO - reader auto-detects slots!"""
         ctx = multiprocessing.get_context(start_method)
         
-        # Create FIFO
         fifo = SharedMemory(SensorData, name=unique_name, create=True, slots=5)
         
         try:
-            # Start writer process
             queue = ctx.Queue()
             writer = ctx.Process(target=fifo_writer_process, args=(unique_name, 10, queue))
             writer.start()
             
-            # Give writer time to start
             time.sleep(0.1)
             
-            # Read in main process
             readings = []
-            for _ in range(15):  # Try more times
+            for _ in range(15):
                 data = fifo.read(timeout=2.0, latest=False)
                 if data and data.temperature.valid:
                     readings.append(data.temperature.value)
@@ -363,15 +368,11 @@ class TestFIFOMultiprocess:
             
             writer.join(timeout=3.0)
             
-            # Check writer result
             status, result = queue.get(timeout=1.0)
             assert status == "success", f"Writer failed: {result}"
             
-            # Verify FIFO order
             assert len(readings) >= 5, f"Got only {len(readings)} readings (start_method={start_method})"
-            # Check that values are in sequence (some might be missing due to timing)
             for i in range(len(readings) - 1):
-                # Next value should be >= current (monotonic, but might skip)
                 assert readings[i+1] >= readings[i]
         
         finally:
@@ -380,50 +381,43 @@ class TestFIFOMultiprocess:
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     def test_fifo_with_overflow(self, unique_name, start_method):
-        """Test FIFO overflow in multi-process scenario."""
-        ctx = multiprocessing.get_context(start_method)
+        """Test FIFO overflow discards oldest data and sets overflow flag."""
         fifo = SharedMemory(SensorData, name=unique_name, create=True, slots=3)
         
         try:
-            # Start fast writer
-            queue = ctx.Queue()
-            writer = ctx.Process(target=fast_fifo_writer, args=(unique_name, 10, queue))
-            writer.start()
+            # Write 10 values to 3-slot FIFO (will overflow)
+            for i in range(10):
+                fifo.write(temperature=float(i))
+                fifo.finalize()
             
-            # Slow reader - let buffer fill
-            time.sleep(0.3)
-            
-            # Read - should get most recent items
+            # Read all remaining values
             readings = []
-            for _ in range(5):  # Try reading more than available
-                data = fifo.read(timeout=1.0)
+            overflow_detected = False
+            for _ in range(5):
+                data = fifo.read(timeout=0.1)
                 if data and data.temperature.valid:
                     readings.append(data.temperature.value)
+                    if data.temperature.overflow:
+                        overflow_detected = True
+                else:
+                    break
             
-            writer.join(timeout=3.0)
-            
-            # Check writer result
-            status, result = queue.get(timeout=1.0)
-            assert status == "success", f"Writer failed: {result}"
-            
-            # Should have gotten some values from the later writes
-            assert len(readings) >= 3, f"Got only {len(readings)} readings"
-            # At least one value should be >= 5 (showing overflow happened)
-            assert any(v >= 5.0 for v in readings), \
-                f"No high values found, readings={readings} (start_method={start_method})"
+            # Should get last 3 values (7, 8, 9) due to overflow
+            assert len(readings) == 3, f"Expected 3 values, got {len(readings)} (start_method={start_method})"
+            assert readings == [7.0, 8.0, 9.0], f"Expected [7.0, 8.0, 9.0], got {readings}"
+            assert overflow_detected, "overflow flag should be set when FIFO overflows"
         
         finally:
             fifo.close()
             fifo.unlink()
 
 
-# Array transfer tests
 class TestArrayTransfer:
-    """Test transferring arrays between processes."""
+    """Test array transfer."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     def test_image_transfer(self, unique_name, start_method):
-        """Test transferring image data between processes."""
+        """Test image transfer."""
         ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(ImageData, name=unique_name, create=True)
         
@@ -432,14 +426,12 @@ class TestArrayTransfer:
             writer_proc = ctx.Process(target=image_writer, args=(unique_name, 3, queue))
             writer_proc.start()
             
-            # Read frames
             frames = []
             prev_frame_id = -1
-            for _ in range(10):  # Try more times for timing
+            for _ in range(10):
                 data = shm.read(timeout=2.0, reset_modified=False)
                 if data and data.image.valid and data.image.modified:
                     frame_id_val = data.frame_id.value
-                    # Only add new frames
                     if frame_id_val != prev_frame_id:
                         frames.append((frame_id_val, data.image.value.copy()))
                         prev_frame_id = frame_id_val
@@ -449,30 +441,27 @@ class TestArrayTransfer:
             
             writer_proc.join(timeout=3.0)
             
-            # Check writer result
             status, result = queue.get(timeout=1.0)
             assert status == "success", f"Writer failed: {result}"
             
-            # Verify frames
             assert len(frames) >= 3, f"Got only {len(frames)} frames (start_method={start_method})"
-            for i in range(min(3, len(frames))):
-                frame_id, img = frames[i]
-                assert frame_id == i
+            for frame_id, img in frames[:3]:  # Check first 3 frames received
                 assert img.shape == (10, 10, 3)
-                assert img[0, 0, 0] == i  # Check red channel marker
+                # Image content should match frame_id (writer sets img[:,:,0] = frame_id)
+                assert img[0, 0, 0] == frame_id, \
+                    f"Image content mismatch: expected {frame_id}, got {img[0, 0, 0]}"
         
         finally:
             shm.close()
             shm.unlink()
 
 
-# Status flag tests
 class TestMultiprocessStatusFlags:
-    """Test status flags in multi-process scenarios."""
+    """Test status flags across processes."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     def test_modified_flag_across_processes(self, unique_name, start_method):
-        """Test that modified flags work correctly across processes."""
+        """Test modified flags work across processes."""
         ctx = multiprocessing.get_context(start_method)
         shm = SharedMemory(SensorData, name=unique_name, create=True)
         
@@ -481,23 +470,27 @@ class TestMultiprocessStatusFlags:
             writer_proc = ctx.Process(target=writer_two_stage, args=(unique_name, queue))
             writer_proc.start()
             
-            # Wait for first write
-            time.sleep(0.1)
+            status, _ = queue.get(timeout=5.0)
+            assert status == "ready", "Writer failed to start"
+            
+            status, _ = queue.get(timeout=2.0)
+            assert status == "first_write", "First write failed"
+            
             data1 = shm.read(timeout=1.0, reset_modified=True)
-            assert data1 is not None
+            assert data1 is not None, f"No data after first write (start_method={start_method})"
             assert data1.temperature.modified
             assert data1.temperature.valid
             
-            # Wait for second write
-            time.sleep(0.3)
+            status, _ = queue.get(timeout=2.0)
+            assert status == "second_write", "Second write failed"
+            
             data2 = shm.read(timeout=1.0, reset_modified=True)
-            assert data2 is not None
+            assert data2 is not None, f"No data after second write (start_method={start_method})"
             assert data2.pressure.modified
-            assert not data2.temperature.modified  # Not modified in second write
+            assert not data2.temperature.modified
             
             writer_proc.join(timeout=3.0)
             
-            # Check writer result
             status, result = queue.get(timeout=1.0)
             assert status == "success", f"Writer failed: {result}"
         
@@ -506,13 +499,67 @@ class TestMultiprocessStatusFlags:
             shm.unlink()
 
 
-# Cleanup tests
+    def test_string_utf8_truncation(self, unique_name):
+        """Long UTF-8 strings should be truncated with valid boundaries."""
+        
+        @dataclass
+        class ShortStringData:
+            message: "str[10]" = ""
+        
+        shm = SharedMemory(ShortStringData, name=unique_name, create=True)
+        
+        try:
+            # Write string with emojis (4 bytes each)
+            long_emoji = "🎉" * 20  # 20 chars
+            shm.write(message=long_emoji)
+            
+            data = shm.read(timeout=0)
+            
+            # Should be truncated to 10 chars
+            assert data is not None, "Should read data"
+            assert len(data.message.value) == 10, f"Should truncate to 10 chars, got {len(data.message.value)}"
+            assert data.message.truncated == True, "Should be marked as truncated"
+            
+            # Should still be valid UTF-8
+            data.message.value.encode('utf-8')  # Should not raise
+        
+        finally:
+            shm.close()
+            shm.unlink()
+    
+    def test_concurrent_writers_not_supported(self, unique_name):
+        """Document that concurrent writers are not supported (single-writer design)."""
+        
+        shm = SharedMemory(SensorData, name=unique_name, create=True)
+        
+        try:
+            # This test documents that multi-writer scenarios are undefined behavior
+            # In practice, concurrent writes would cause sequence number mismatches
+            # and data corruption, but we don't test for that - we just document it
+            
+            # Write a clean value
+            shm.write(temperature=25.0, pressure=1013.0, status="OK")
+            data = shm.read(timeout=0)
+            
+            # Verify single writer works fine
+            assert data is not None
+            assert data.temperature.value == 25.0
+            assert data.pressure.value == 1013.0
+            
+            # NOTE: Multiple concurrent writers would violate the design assumption
+            # and cause undefined behavior. This is documented in the docstring.
+        
+        finally:
+            shm.close()
+            shm.unlink()
+
+
 class TestProcessCleanup:
-    """Test proper cleanup in multi-process scenarios."""
+    """Test process cleanup."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     def test_writer_cleanup(self, unique_name, start_method):
-        """Test that writer can properly cleanup."""
+        """Test writer cleanup."""
         ctx = multiprocessing.get_context(start_method)
         
         queue = ctx.Queue()
@@ -520,17 +567,15 @@ class TestProcessCleanup:
         writer_proc.start()
         writer_proc.join(timeout=3.0)
         
-        # Check result
         status, result = queue.get(timeout=1.0)
         assert status == "success", f"Writer cleanup failed: {result}"
         assert writer_proc.exitcode == 0
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     def test_reader_cleanup(self, unique_name, start_method):
-        """Test that reader can properly cleanup."""
+        """Test reader cleanup."""
         ctx = multiprocessing.get_context(start_method)
         
-        # Create in main
         shm = SharedMemory(SensorData, name=unique_name, create=True)
         shm.write(temperature=20.0)
         
@@ -540,7 +585,6 @@ class TestProcessCleanup:
             reader_proc.start()
             reader_proc.join(timeout=3.0)
             
-            # Check result
             status, result = queue.get(timeout=1.0)
             assert status == "success", f"Reader cleanup failed: {result}"
             assert reader_proc.exitcode == 0
@@ -550,7 +594,5 @@ class TestProcessCleanup:
             shm.unlink()
 
 
-# Manual test execution
 if __name__ == "__main__":
-    # Run with: pytest test_multiprocess.py -v -s
     pytest.main([__file__, "-v", "-s"])

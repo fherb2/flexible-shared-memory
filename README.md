@@ -64,7 +64,7 @@ shm.unlink()
 ### Reader Process
 
 ```python
-# Connect to existing shared memory
+# Connect to existing shared memory (auto-detects all configuration from header)
 shm = SharedMemory(SensorData, name="sensors")
 
 # Read data with status
@@ -99,8 +99,7 @@ shm.close()
 ## Field Status Tracking
 
 Each field provides status information:
-
-```python
+`````python
 data = shm.read()
 pos = data.position
 
@@ -113,10 +112,12 @@ else:
         log.error("Data truncated - may be unusable!")
     elif pos.unwritten:
         log.warning("No data available yet")
+    elif pos.overflow:
+        log.warning("FIFO overflow - older data was lost!")
   
 if pos.modified:        # Changed since last slot/read
     print("Position updated!")
-```
+`````
 
  **Important** : A field is only `valid` if it contains the complete, exact data from the source. Truncated data (e.g., incomplete array coefficients) may be completely unusable and should be treated as an error condition.
 
@@ -125,7 +126,7 @@ if pos.modified:        # Changed since last slot/read
 For buffered communication with multiple slots:
 
 ```python
-# Create FIFO with 10 slots
+# Writer: Create FIFO with 10 slots
 fifo = SharedMemory(SensorData, name="buffer", slots=10, create=True)
 
 # Writer: Stage and commit
@@ -133,9 +134,12 @@ fifo.write(temperature=23.5)
 fifo.write(pressure=1013.0)
 fifo.finalize()  # Atomic commit
 
+# Reader: Auto-detects slots from header (no slots parameter needed!)
+reader = SharedMemory(SensorData, name="buffer")
+
 # Reader: Read oldest or skip to latest
-data = fifo.read(timeout=1.0, latest=False)  # FIFO order
-data = fifo.read(timeout=0.5, latest=True)   # Skip to newest
+data = reader.read(timeout=1.0, latest=False)  # FIFO order
+data = reader.read(timeout=0.5, latest=True)   # Skip to newest
 ```
 
 ## Advanced Features

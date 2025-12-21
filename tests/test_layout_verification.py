@@ -1,0 +1,317 @@
+"""
+Layout verification and header integrity tests.
+
+Tests that the self-describing header works correctly:
+- Hash validation prevents corruption
+- Layout is consistent across processes
+- Field order is preserved
+"""
+
+import pytest
+from dataclasses import dataclass
+import multiprocessing
+from multiprocessing import Queue
+import sys
+
+from flexible_shared_memory import SharedMemory
+
+
+@dataclass
+class LayoutTestData:
+    temperature: float = 0.0
+    pressure: float = 0.0
+    count: int = 0
+    active: bool = False
+    message: "str[32]" = ""
+
+
+PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spawn"]
+
+
+def extract_layout_info(name: str, queue: Queue):
+    """Extract layout info from subprocess."""
+    try:
+        shm = SharedMemory(LayoutTestData, name=name)
+        
+        layout_info = {
+            'total_size': shm._layout.total_size,
+            'slot_size': shm._slot_size,
+            'num_fields': len(shm._layout.fields),
+            'slots': shm.slots,
+            'is_fifo': shm.is_fifo,
+            'fields': []
+        }
+        
+        for field in shm._layout.fields:
+            layout_info['fields'].append({
+                'name': field.name,
+                'offset': field.offset,
+                'size': field.size,
+            })
+        
+        shm.close()
+        queue.put(("success", layout_info))
+    except Exception as e:
+        import traceback
+        queue.put(("error", f"{e}\n{traceback.format_exc()}"))
+
+
+def write_known_pattern(name: str, queue: Queue):
+    """Write known pattern."""
+    try:
+        shm = SharedMemory(LayoutTestData, name=name)
+        
+        shm.write(
+            temperature=12.34,
+            pressure=56.78,
+            count=42,
+            active=True,
+            message="TestPattern"
+        )
+        
+        shm.close()
+        queue.put(("success", None))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+class TestLayoutConsistency:
+    """Test layout consistency across processes."""
+    
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    @pytest.mark.parametrize("num_slots", [1, 5])
+    def test_layout_matches_across_processes(self, start_method, num_slots):
+        """Layout is identical in parent and child."""
+        ctx = multiprocessing.get_context(start_method)
+        name = f"test_layout_{start_method}_{num_slots}"
+        
+        shm = SharedMemory(LayoutTestData, name=name, create=True, slots=num_slots)
+        
+        try:
+            # Parent layout
+            parent_layout = {
+                'total_size': shm._layout.total_size,
+                'slot_size': shm._slot_size,
+                'num_fields': len(shm._layout.fields),
+                'slots': shm.slots,
+                'fields': [(f.name, f.offset, f.size) for f in shm._layout.fields]
+            }
+            
+            # Child layout
+            queue = ctx.Queue()
+            proc = ctx.Process(target=extract_layout_info, args=(name, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, child_layout = queue.get(timeout=1.0)
+            assert status == "success", f"Child failed: {child_layout}"
+            
+            # Compare
+            assert parent_layout['total_size'] == child_layout['total_size']
+            assert parent_layout['slot_size'] == child_layout['slot_size']
+            assert parent_layout['slots'] == child_layout['slots']
+            
+            # Check fields
+            for i, (pf, cf) in enumerate(zip(parent_layout['fields'], child_layout['fields'])):
+                p_name, p_offset, p_size = pf
+                c_name = cf['name']
+                c_offset = cf['offset']
+                c_size = cf['size']
+                
+                assert p_name == c_name, \
+                    f"Field {i} name mismatch: {p_name} != {c_name}"
+                assert p_offset == c_offset, \
+                    f"Field {p_name} offset mismatch: {p_offset} != {c_offset}"
+                assert p_size == c_size, \
+                    f"Field {p_name} size mismatch: {p_size} != {c_size}"
+        
+        finally:
+            shm.close()
+            shm.unlink()
+    
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_data_transmission_with_known_pattern(self, start_method):
+        """Known data pattern is correctly transmitted."""
+        ctx = multiprocessing.get_context(start_method)
+        name = f"test_pattern_{start_method}"
+        
+        shm = SharedMemory(LayoutTestData, name=name, create=True)
+        
+        try:
+            # Write from child
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_known_pattern, args=(name, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            # Read in parent
+            data = shm.read(timeout=1.0)
+            assert data is not None
+            
+            assert data.temperature.valid
+            assert abs(data.temperature.value - 12.34) < 1e-10
+            
+            assert data.pressure.valid
+            assert abs(data.pressure.value - 56.78) < 1e-10
+            
+            assert data.count.valid
+            assert data.count.value == 42
+            
+            assert data.active.valid
+            assert data.active.value is True
+            
+            assert data.message.valid
+            assert data.message.value == "TestPattern"
+        
+        finally:
+            shm.close()
+            shm.unlink()
+
+
+class TestHeaderIntegrity:
+    """Test header hash validation."""
+    
+    def test_header_hash_protects_against_wrong_dataclass(self):
+        """Hash validation detects wrong dataclass structure."""
+        name = "test_hash_protection"
+        
+        @dataclass
+        class DifferentData:
+            value: float = 0.0
+            other: int = 0
+        
+        # Create with LayoutTestData
+        shm = SharedMemory(LayoutTestData, name=name, create=True)
+        shm.write(temperature=25.0)
+        
+        try:
+            # Try to open with different dataclass - should fail hash check
+            with pytest.raises(ValueError, match="Dataclass structure mismatch"):
+                SharedMemory(DifferentData, name=name)
+        
+        finally:
+            shm.close()
+            shm.unlink()
+    
+    def test_valid_header_passes_check(self):
+        """Valid header passes hash check."""
+        name = "test_valid_hash"
+        
+        shm1 = SharedMemory(LayoutTestData, name=name, create=True)
+        shm1.write(temperature=1.0)
+        
+        try:
+            # Should open fine
+            shm2 = SharedMemory(LayoutTestData, name=name)
+            data = shm2.read(timeout=0)
+            
+            assert data is not None
+            assert abs(data.temperature.value - 1.0) < 1e-10
+            
+            shm2.close()
+        
+        finally:
+            shm1.close()
+            shm1.unlink()
+
+    def test_field_order_is_deterministic(self):
+        """Field order is deterministic across multiple instantiations."""
+        name = "test_field_order"
+        
+        # Create multiple instances and check field order
+        shm1 = SharedMemory(LayoutTestData, name=name, create=True)
+        
+        try:
+            # Extract field order from first instance
+            fields1 = [(f.name, f.offset, f.size) for f in shm1._layout.fields]
+            
+            # Close and create new instance
+            shm1.close()
+            
+            shm2 = SharedMemory(LayoutTestData, name=name)
+            fields2 = [(f.name, f.offset, f.size) for f in shm2._layout.fields]
+            shm2.close()
+            
+            # Field order must be identical
+            assert fields1 == fields2, \
+                "Field order must be deterministic across instantiations"
+            
+            # Verify expected field names in expected order
+            expected_names = ['temperature', 'pressure', 'count', 'active', 'message']
+            actual_names = [f.name for f in shm1._layout.fields]
+            
+            assert actual_names == expected_names, \
+                f"Expected field order {expected_names}, got {actual_names}"
+        
+        finally:
+            shm1.unlink()
+    
+    def test_different_dataclass_different_hash(self):
+        """Different dataclasses produce different header hashes."""
+        
+        @dataclass
+        class DataA:
+            field1: float = 0.0
+            field2: int = 0
+        
+        @dataclass
+        class DataB:
+            field1: float = 0.0
+            field3: int = 0  # Different field name
+        
+        name_a = "test_hash_a"
+        name_b = "test_hash_b"
+        
+        shm_a = SharedMemory(DataA, name=name_a, create=True)
+        shm_b = SharedMemory(DataB, name=name_b, create=True)
+        
+        try:
+            # Extract hashes from headers
+            hash_a = int.from_bytes(shm_a.shm.buf[0:8], 'little')
+            hash_b = int.from_bytes(shm_b.shm.buf[0:8], 'little')
+            
+            # Hashes must be different for different structures
+            assert hash_a != hash_b, \
+                "Different dataclass structures must produce different hashes"
+        
+        finally:
+            shm_a.close()
+            shm_a.unlink()
+            shm_b.close()
+            shm_b.unlink()
+    
+    def test_same_dataclass_same_hash(self):
+        """Same dataclass produces same hash."""
+        
+        @dataclass
+        class ConsistentData:
+            x: float = 0.0
+            y: int = 0
+        
+        name1 = "test_same_hash_1"
+        name2 = "test_same_hash_2"
+        
+        shm1 = SharedMemory(ConsistentData, name=name1, create=True)
+        shm2 = SharedMemory(ConsistentData, name=name2, create=True)
+        
+        try:
+            # Extract hashes
+            hash1 = int.from_bytes(shm1.shm.buf[0:8], 'little')
+            hash2 = int.from_bytes(shm2.shm.buf[0:8], 'little')
+            
+            # Hashes must be identical for same structure
+            assert hash1 == hash2, \
+                "Same dataclass structure must produce identical hashes"
+        
+        finally:
+            shm1.close()
+            shm1.unlink()
+            shm2.close()
+            shm2.unlink()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])
