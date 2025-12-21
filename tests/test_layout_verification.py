@@ -313,5 +313,72 @@ class TestHeaderIntegrity:
             shm2.unlink()
 
 
+class TestLayoutEdgeCases:
+    """Test edge cases in layout handling."""
+    
+    def test_unsupported_field_type_raises_error(self):
+        """Test that unsupported field types raise ValueError."""
+        
+        @dataclass
+        class UnsupportedData:
+            value: dict = None  # dict is not supported!
+        
+        name = "test_unsupported"
+        
+        # Should raise ValueError during layout analysis
+        with pytest.raises(ValueError, match="Unsupported type"):
+            SharedMemory(UnsupportedData, name=name, create=True)
+    
+    def test_from_dict_backwards_compatibility(self):
+        """Test that from_dict handles old data without new fields."""
+        
+        # Simulate old serialized data (without string_max_bytes and array_flat_size)
+        old_data = {
+            'name': 'test_field',
+            'field_type': 'str',
+            'is_scalar': False,
+            'is_string': True,
+            'is_array': False,
+            'string_max_chars': 32,
+            # 'string_max_bytes': missing (old version)
+            'array_dtype': None,
+            'array_shape': None,
+            # 'array_flat_size': missing (old version)
+            'size': 132,
+            'offset': 16
+        }
+        
+        # Should handle missing fields gracefully
+        field_info = _FieldInfo.from_dict(old_data)
+        
+        assert field_info.name == 'test_field'
+        assert field_info.string_max_chars == 32
+        assert field_info.string_max_bytes == 128  # Should compute 32 * 4
+        assert field_info.array_flat_size == 0
+    
+    def test_from_dict_array_backwards_compatibility(self):
+        """Test from_dict computes array_flat_size if missing."""
+        
+        old_data = {
+            'name': 'array_field',
+            'field_type': 'str',
+            'is_scalar': False,
+            'is_string': False,
+            'is_array': True,
+            'string_max_chars': 0,
+            'string_max_bytes': 0,
+            'array_dtype': 'dtype(\'float64\')',
+            'array_shape': (5, 5),
+            # 'array_flat_size': missing
+            'size': 200,
+            'offset': 16
+        }
+        
+        field_info = _FieldInfo.from_dict(old_data)
+        
+        assert field_info.array_flat_size == 25  # Should compute 5 * 5
+
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
