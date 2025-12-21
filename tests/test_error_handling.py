@@ -9,7 +9,6 @@ Tests cover:
 
 import pytest
 from dataclasses import dataclass
-import sys
 
 from flexible_shared_memory import SharedMemory
 
@@ -26,16 +25,16 @@ class TestInitValidation:
     def test_invalid_slots_zero(self):
         """Test that slots=0 raises ValueError."""
         with pytest.raises(ValueError, match="slots must be >= 1"):
-            SharedMemory(SimpleData, name="test_invalid", create=True, slots=0)
+            SharedMemory(SimpleData, slots=0)
     
     def test_invalid_slots_negative(self):
         """Test that negative slots raises ValueError."""
         with pytest.raises(ValueError, match="slots must be >= 1"):
-            SharedMemory(SimpleData, name="test_invalid", create=True, slots=-1)
+            SharedMemory(SimpleData, slots=-1)
     
     def test_auto_generated_name(self):
         """Test that name is auto-generated if not provided."""
-        shm = SharedMemory(SimpleData, create=True)
+        shm = SharedMemory(SimpleData)
         
         try:
             # Name should start with "shm_"
@@ -49,6 +48,25 @@ class TestInitValidation:
         finally:
             shm.close()
             shm.unlink()
+    
+    def test_attach_mode_rejects_slots_parameter(self):
+        """Test that ATTACH mode rejects slots parameter."""
+        # Create shared memory first
+        shm = SharedMemory(SimpleData, slots=5)
+        name = shm.name
+        
+        try:
+            # Try to attach with slots parameter - should fail
+            with pytest.raises(ValueError, match="not allowed in ATTACH mode"):
+                SharedMemory(name, slots=5)
+        finally:
+            shm.close()
+            shm.unlink()
+    
+    def test_create_mode_rejects_expected_type(self):
+        """Test that CREATE mode rejects expected_type parameter."""
+        with pytest.raises(ValueError, match="not allowed in CREATE mode"):
+            SharedMemory(SimpleData, expected_type=SimpleData)
 
 
 class TestReaderValidation:

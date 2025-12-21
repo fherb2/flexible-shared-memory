@@ -13,18 +13,11 @@ Tests cover:
 import pytest
 import numpy as np
 from dataclasses import dataclass
-import time
 import multiprocessing
 from multiprocessing import Queue
 import sys
 
 from flexible_shared_memory import SharedMemory, FieldStatus
-
-
-@pytest.fixture
-def unique_name():
-    """Generate unique name for each test."""
-    return f"test_shm_{time.time_ns()}"
 
 
 PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spawn"]
@@ -53,11 +46,11 @@ class MixedData:
     values: "int32[5]" = None
 
 
-# Helper functions
+# Helper functions - ALL use ATTACH mode
 def write_both_fields(name: str, value: float, count: int, queue: Queue):
     """Write both fields."""
     try:
-        shm = SharedMemory(SimpleData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(value=value, count=count)
         shm.close()
         queue.put(("success", None))
@@ -68,7 +61,7 @@ def write_both_fields(name: str, value: float, count: int, queue: Queue):
 def write_single_field(name: str, value: float, queue: Queue):
     """Write only value field."""
     try:
-        shm = SharedMemory(SimpleData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(value=value)
         shm.close()
         queue.put(("success", None))
@@ -79,7 +72,7 @@ def write_single_field(name: str, value: float, queue: Queue):
 def write_long_string(name: str, length: int, queue: Queue):
     """Write string longer than limit."""
     try:
-        shm = SharedMemory(StringData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(message="a" * length)
         shm.close()
         queue.put(("success", None))
@@ -90,8 +83,8 @@ def write_long_string(name: str, length: int, queue: Queue):
 def write_oversized_array(name: str, queue: Queue):
     """Write array larger than field."""
     try:
+        shm = SharedMemory(name)  # ATTACH
         arr = np.arange(15, dtype=np.float32)
-        shm = SharedMemory(ArrayData, name=name)
         shm.write(data=arr)
         shm.close()
         queue.put(("success", None))
@@ -102,7 +95,7 @@ def write_oversized_array(name: str, queue: Queue):
 def write_mixed_truncated(name: str, queue: Queue):
     """Write mixed data with truncated string."""
     try:
-        shm = SharedMemory(MixedData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(
             position=1.0,
             name="a" * 30,
@@ -118,14 +111,15 @@ class TestValidFlag:
     """Test the valid flag behavior."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_valid_after_write(self, unique_name, start_method):
+    def test_valid_after_write(self, start_method):
         """Test that written fields are marked as valid."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE with auto-generated name
+        name = shm.name  # Get generated name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_both_fields, args=(unique_name, 1.0, 1, queue))
+            proc = ctx.Process(target=write_both_fields, args=(name, 1.0, 1, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -140,14 +134,15 @@ class TestValidFlag:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_unwritten_not_valid(self, unique_name, start_method):
+    def test_unwritten_not_valid(self, start_method):
         """Test that unwritten fields are not valid."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_single_field, args=(unique_name, 1.0, queue))
+            proc = ctx.Process(target=write_single_field, args=(name, 1.0, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -162,14 +157,15 @@ class TestValidFlag:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_truncated_not_valid(self, unique_name, start_method):
+    def test_truncated_not_valid(self, start_method):
         """Test that truncated fields are NOT valid."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(StringData, name=unique_name, create=True)
+        shm = SharedMemory(StringData)
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_long_string, args=(unique_name, 50, queue))
+            proc = ctx.Process(target=write_long_string, args=(name, 50, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -187,9 +183,9 @@ class TestValidFlag:
 class TestUnwrittenFlag:
     """Test the unwritten flag behavior."""
     
-    def test_unwritten_on_new_slot(self, unique_name):
+    def test_unwritten_on_new_slot(self):
         """Test that new slots have unwritten flags set."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)
         
         try:
             data = shm.read(timeout=0)
@@ -205,14 +201,15 @@ class TestModifiedFlag:
     """Test the modified flag behavior."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_modified_set_on_write(self, unique_name, start_method):
+    def test_modified_set_on_write(self, start_method):
         """Test that modified flag is set when field is written."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_both_fields, args=(unique_name, 1.0, 1, queue))
+            proc = ctx.Process(target=write_both_fields, args=(name, 1.0, 1, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -227,14 +224,15 @@ class TestModifiedFlag:
             shm.unlink()
 
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_modified_cleared_by_reset(self, unique_name, start_method):
+    def test_modified_cleared_by_reset(self, start_method):
         """Test that modified flag is cleared by reset_modified=True."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_both_fields, args=(unique_name, 1.0, 1, queue))
+            proc = ctx.Process(target=write_both_fields, args=(name, 1.0, 1, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -263,15 +261,16 @@ class TestModifiedFlag:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_modified_not_set_for_unwritten_fields(self, unique_name, start_method):
+    def test_modified_not_set_for_unwritten_fields(self, start_method):
         """Test that modified flag is not set for fields that weren't written."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)
+        name = shm.name
         
         try:
             # Write only value, not count
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_single_field, args=(unique_name, 1.0, queue))
+            proc = ctx.Process(target=write_single_field, args=(name, 1.0, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -294,14 +293,15 @@ class TestTruncatedFlag:
     """Test the truncated flag behavior."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_truncated_for_long_string(self, unique_name, start_method):
+    def test_truncated_for_long_string(self, start_method):
         """Test that truncated flag is set for oversized strings."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(StringData, name=unique_name, create=True)
+        shm = SharedMemory(StringData)
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_long_string, args=(unique_name, 40, queue))
+            proc = ctx.Process(target=write_long_string, args=(name, 40, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -316,14 +316,15 @@ class TestTruncatedFlag:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_truncated_for_oversized_array(self, unique_name, start_method):
+    def test_truncated_for_oversized_array(self, start_method):
         """Test that truncated flag is set for oversized arrays."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ArrayData, name=unique_name, create=True)
+        shm = SharedMemory(ArrayData)  # CREATE
+        name = shm.name  # Get generated name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_oversized_array, args=(unique_name, queue))
+            proc = ctx.Process(target=write_oversized_array, args=(name, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -338,14 +339,15 @@ class TestTruncatedFlag:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_truncated_only_affects_field(self, unique_name, start_method):
+    def test_truncated_only_affects_field(self, start_method):
         """Test that truncated flag only affects the truncated field."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(MixedData, name=unique_name, create=True)
+        shm = SharedMemory(MixedData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_mixed_truncated, args=(unique_name, queue))
+            proc = ctx.Process(target=write_mixed_truncated, args=(name, queue))
             proc.start()
             proc.join(timeout=2.0)
             

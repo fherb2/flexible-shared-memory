@@ -31,7 +31,7 @@ PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spaw
 def extract_layout_info(name: str, queue: Queue):
     """Extract layout info from subprocess."""
     try:
-        shm = SharedMemory(LayoutTestData, name=name)
+        shm = SharedMemory(name)  # ATTACH - auto-detects everything
         
         layout_info = {
             'total_size': shm._layout.total_size,
@@ -59,7 +59,7 @@ def extract_layout_info(name: str, queue: Queue):
 def write_known_pattern(name: str, queue: Queue):
     """Write known pattern."""
     try:
-        shm = SharedMemory(LayoutTestData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         
         shm.write(
             temperature=12.34,
@@ -83,9 +83,9 @@ class TestLayoutConsistency:
     def test_layout_matches_across_processes(self, start_method, num_slots):
         """Layout is identical in parent and child."""
         ctx = multiprocessing.get_context(start_method)
-        name = f"test_layout_{start_method}_{num_slots}"
         
-        shm = SharedMemory(LayoutTestData, name=name, create=True, slots=num_slots)
+        shm = SharedMemory(LayoutTestData, slots=num_slots)  # CREATE
+        name = shm.name  # Get generated name
         
         try:
             # Parent layout
@@ -133,9 +133,9 @@ class TestLayoutConsistency:
     def test_data_transmission_with_known_pattern(self, start_method):
         """Known data pattern is correctly transmitted."""
         ctx = multiprocessing.get_context(start_method)
-        name = f"test_pattern_{start_method}"
         
-        shm = SharedMemory(LayoutTestData, name=name, create=True)
+        shm = SharedMemory(LayoutTestData)  # CREATE
+        name = shm.name
         
         try:
             # Write from child
@@ -176,7 +176,6 @@ class TestHeaderIntegrity:
     
     def test_header_hash_protects_against_wrong_dataclass(self):
         """Hash validation detects wrong dataclass structure."""
-        name = "test_hash_protection"
         
         @dataclass
         class DifferentData:
@@ -184,13 +183,14 @@ class TestHeaderIntegrity:
             other: int = 0
         
         # Create with LayoutTestData
-        shm = SharedMemory(LayoutTestData, name=name, create=True)
+        shm = SharedMemory(LayoutTestData)  # CREATE
+        name = shm.name
         shm.write(temperature=25.0)
         
         try:
             # Try to open with different dataclass - should fail hash check
-            with pytest.raises(ValueError, match="Dataclass structure mismatch"):
-                SharedMemory(DifferentData, name=name)
+            with pytest.raises(ValueError, match="Structure mismatch"):
+                SharedMemory(name, expected_type=DifferentData)
         
         finally:
             shm.close()
@@ -198,14 +198,14 @@ class TestHeaderIntegrity:
     
     def test_valid_header_passes_check(self):
         """Valid header passes hash check."""
-        name = "test_valid_hash"
         
-        shm1 = SharedMemory(LayoutTestData, name=name, create=True)
+        shm1 = SharedMemory(LayoutTestData)  # CREATE
+        name = shm1.name
         shm1.write(temperature=1.0)
         
         try:
-            # Should open fine
-            shm2 = SharedMemory(LayoutTestData, name=name)
+            # Should open fine with expected_type validation
+            shm2 = SharedMemory(name, expected_type=LayoutTestData)
             data = shm2.read(timeout=0)
             
             assert data is not None
@@ -219,19 +219,19 @@ class TestHeaderIntegrity:
 
     def test_field_order_is_deterministic(self):
         """Field order is deterministic across multiple instantiations."""
-        name = "test_field_order"
         
         # Create multiple instances and check field order
-        shm1 = SharedMemory(LayoutTestData, name=name, create=True)
+        shm1 = SharedMemory(LayoutTestData)  # CREATE
+        name = shm1.name
         
         try:
             # Extract field order from first instance
             fields1 = [(f.name, f.offset, f.size) for f in shm1._layout.fields]
             
-            # Close and create new instance
+            # Close and create new instance (ATTACH)
             shm1.close()
             
-            shm2 = SharedMemory(LayoutTestData, name=name)
+            shm2 = SharedMemory(name)  # ATTACH
             fields2 = [(f.name, f.offset, f.size) for f in shm2._layout.fields]
             shm2.close()
             
@@ -241,7 +241,7 @@ class TestHeaderIntegrity:
             
             # Verify expected field names in expected order
             expected_names = ['temperature', 'pressure', 'count', 'active', 'message']
-            actual_names = [f.name for f in shm1._layout.fields]
+            actual_names = [f[0] for f in fields1]
             
             assert actual_names == expected_names, \
                 f"Expected field order {expected_names}, got {actual_names}"
@@ -262,11 +262,8 @@ class TestHeaderIntegrity:
             field1: float = 0.0
             field3: int = 0  # Different field name
         
-        name_a = "test_hash_a"
-        name_b = "test_hash_b"
-        
-        shm_a = SharedMemory(DataA, name=name_a, create=True)
-        shm_b = SharedMemory(DataB, name=name_b, create=True)
+        shm_a = SharedMemory(DataA)  # CREATE
+        shm_b = SharedMemory(DataB)  # CREATE
         
         try:
             # Extract hashes from headers
@@ -291,11 +288,8 @@ class TestHeaderIntegrity:
             x: float = 0.0
             y: int = 0
         
-        name1 = "test_same_hash_1"
-        name2 = "test_same_hash_2"
-        
-        shm1 = SharedMemory(ConsistentData, name=name1, create=True)
-        shm2 = SharedMemory(ConsistentData, name=name2, create=True)
+        shm1 = SharedMemory(ConsistentData)  # CREATE
+        shm2 = SharedMemory(ConsistentData)  # CREATE (different instance)
         
         try:
             # Extract hashes
@@ -323,11 +317,9 @@ class TestLayoutEdgeCases:
         class UnsupportedData:
             value: dict = None  # dict is not supported!
         
-        name = "test_unsupported"
-        
         # Should raise ValueError during layout analysis
         with pytest.raises(ValueError, match="Unsupported type"):
-            SharedMemory(UnsupportedData, name=name, create=True)
+            SharedMemory(UnsupportedData)  # CREATE
 
 
 

@@ -12,18 +12,11 @@ Tests cover:
 import pytest
 import numpy as np
 from dataclasses import dataclass
-import time
 import multiprocessing
 from multiprocessing import Queue
 import sys
 
 from flexible_shared_memory import SharedMemory, ValueWithStatus, FieldStatus
-
-
-@pytest.fixture
-def unique_name():
-    """Generate unique name for each test."""
-    return f"test_shm_{time.time_ns()}"
 
 
 PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spawn"]
@@ -46,11 +39,11 @@ class ArrayData:
     data: "float64[10]" = None
 
 
-# Helper functions
+# Helper functions - ALL use ATTACH mode
 def write_float(name: str, value: float, queue: Queue):
     """Write float value."""
     try:
-        shm = SharedMemory(ScalarData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(temperature=value)
         shm.close()
         queue.put(("success", value))
@@ -61,7 +54,7 @@ def write_float(name: str, value: float, queue: Queue):
 def write_int(name: str, value: int, queue: Queue):
     """Write int value."""
     try:
-        shm = SharedMemory(ScalarData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(count=value)
         shm.close()
         queue.put(("success", value))
@@ -72,7 +65,7 @@ def write_int(name: str, value: int, queue: Queue):
 def write_bool(name: str, value: bool, queue: Queue):
     """Write bool value."""
     try:
-        shm = SharedMemory(ScalarData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(active=value)
         shm.close()
         queue.put(("success", value))
@@ -83,7 +76,7 @@ def write_bool(name: str, value: bool, queue: Queue):
 def write_string(name: str, msg: str, queue: Queue):
     """Write string value."""
     try:
-        shm = SharedMemory(StringData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(message=msg)
         shm.close()
         queue.put(("success", msg))
@@ -95,7 +88,7 @@ def write_array(name: str, queue: Queue):
     """Write array value."""
     try:
         arr = np.arange(10, dtype=np.float64)
-        shm = SharedMemory(ArrayData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(data=arr)
         shm.close()
         queue.put(("success", arr.tolist()))
@@ -107,14 +100,15 @@ class TestValueProperty:
     """Test .value property access."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_value_property_float(self, unique_name, start_method):
+    def test_value_property_float(self, start_method):
         """Test accessing float value via .value property."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_float, args=(unique_name, 23.5, queue))
+            proc = ctx.Process(target=write_float, args=(name, 23.5, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -130,14 +124,15 @@ class TestValueProperty:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_value_property_int(self, unique_name, start_method):
+    def test_value_property_int(self, start_method):
         """Test accessing int value via .value property."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_int, args=(unique_name, 42, queue))
+            proc = ctx.Process(target=write_int, args=(name, 42, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -153,14 +148,15 @@ class TestValueProperty:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_value_property_bool(self, unique_name, start_method):
+    def test_value_property_bool(self, start_method):
         """Test accessing bool value via .value property."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_bool, args=(unique_name, True, queue))
+            proc = ctx.Process(target=write_bool, args=(name, True, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -176,14 +172,15 @@ class TestValueProperty:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_value_property_string(self, unique_name, start_method):
+    def test_value_property_string(self, start_method):
         """Test accessing string value via .value property."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(StringData, name=unique_name, create=True)
+        shm = SharedMemory(StringData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_string, args=(unique_name, "Hello", queue))
+            proc = ctx.Process(target=write_string, args=(name, "Hello", queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -199,14 +196,15 @@ class TestValueProperty:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_value_property_array(self, unique_name, start_method):
+    def test_value_property_array(self, start_method):
         """Test accessing array value via .value property."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ArrayData, name=unique_name, create=True)
+        shm = SharedMemory(ArrayData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_array, args=(unique_name, queue))
+            proc = ctx.Process(target=write_array, args=(name, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -227,14 +225,15 @@ class TestMagicConversions:
     """Test magic method conversions."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_float_conversion(self, unique_name, start_method):
+    def test_float_conversion(self, start_method):
         """Test float() magic method."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_float, args=(unique_name, 23.5, queue))
+            proc = ctx.Process(target=write_float, args=(name, 23.5, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -250,14 +249,15 @@ class TestMagicConversions:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_int_conversion(self, unique_name, start_method):
+    def test_int_conversion(self, start_method):
         """Test int() magic method."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_int, args=(unique_name, 42, queue))
+            proc = ctx.Process(target=write_int, args=(name, 42, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -277,14 +277,15 @@ class TestArithmeticOperations:
     """Test arithmetic operations on ValueWithStatus."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_addition(self, unique_name, start_method):
+    def test_addition(self, start_method):
         """Test addition operation."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_float, args=(unique_name, 20.0, queue))
+            proc = ctx.Process(target=write_float, args=(name, 20.0, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -299,14 +300,15 @@ class TestArithmeticOperations:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_multiplication(self, unique_name, start_method):
+    def test_multiplication(self, start_method):
         """Test multiplication operation."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_int, args=(unique_name, 5, queue))
+            proc = ctx.Process(target=write_int, args=(name, 5, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -324,14 +326,14 @@ class TestStatusFlags:
     """Test status flag behavior in detail."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_truncated_flag_string(self, unique_name, start_method):
+    def test_truncated_flag_string(self, start_method):
         """Test truncated flag is set when string is truncated."""
         
         @dataclass
         class ShortString:
             msg: "str[5]" = ""  # Only 5 chars max
         
-        shm = SharedMemory(ShortString, name=unique_name, create=True)
+        shm = SharedMemory(ShortString)  # CREATE
         
         try:
             # Write string longer than 5 chars
@@ -354,14 +356,14 @@ class TestStatusFlags:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_truncated_flag_array(self, unique_name, start_method):
+    def test_truncated_flag_array(self, start_method):
         """Test truncated flag is set when array is truncated."""
         
         @dataclass
         class SmallArray:
             data: "float64[5]" = None  # Only 5 elements
         
-        shm = SharedMemory(SmallArray, name=unique_name, create=True)
+        shm = SharedMemory(SmallArray)  # CREATE
         
         try:
             # Write array with 10 elements (more than 5)
@@ -382,9 +384,9 @@ class TestStatusFlags:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_unwritten_flag(self, unique_name, start_method):
+    def test_unwritten_flag(self, start_method):
         """Test unwritten flag for fields that were never written."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
         
         try:
             # Write only temperature, leave count and active unwritten
@@ -410,9 +412,9 @@ class TestStatusFlags:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_overflow_flag_in_fifo(self, unique_name, start_method):
+    def test_overflow_flag_in_fifo(self, start_method):
         """Test overflow flag is set when FIFO overflows."""
-        fifo = SharedMemory(ScalarData, name=unique_name, create=True, slots=2)
+        fifo = SharedMemory(ScalarData, slots=2)  # CREATE FIFO
         
         try:
             # Write 4 values to 2-slot FIFO (causes overflow)
@@ -434,7 +436,7 @@ class TestStatusFlags:
             fifo.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_valid_property_combines_flags(self, unique_name, start_method):
+    def test_valid_property_combines_flags(self, start_method):
         """Test that valid property is false when truncated OR unwritten."""
         
         @dataclass
@@ -443,7 +445,7 @@ class TestStatusFlags:
             short: "str[3]" = ""
             unset: int = 0
         
-        shm = SharedMemory(MixedData, name=unique_name, create=True)
+        shm = SharedMemory(MixedData)  # CREATE
         
         try:
             # Write good field normally, short field with truncation, leave unset unwritten
@@ -471,9 +473,9 @@ class TestStatusFlags:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_modified_flag_cleared_after_reset(self, unique_name, start_method):
+    def test_modified_flag_cleared_after_reset(self, start_method):
         """Test that modified flag is cleared by reset_modified=True."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
         
         try:
             # Write data
@@ -505,7 +507,7 @@ class TestStatusFlags:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_flag_combinations(self, unique_name, start_method):
+    def test_flag_combinations(self, start_method):
         """Test various flag combinations work correctly."""
         
         @dataclass
@@ -514,7 +516,7 @@ class TestStatusFlags:
             truncated_field: "str[2]" = ""
             unwritten_field: int = 0
         
-        shm = SharedMemory(FlagTest, name=unique_name, create=True)
+        shm = SharedMemory(FlagTest)  # CREATE
         
         try:
             # First write: normal + truncated, leave unwritten

@@ -12,6 +12,10 @@ License
 MIT License - Copyright (c) 2024 fherb2
 https://gitlab.com/fherb2/flexible-shared-memory
 
+Version
+-------
+2.0 - Simplified API with auto-reconstruction
+
 Key Feature: Self-Describing Header
 ------------------------------------
 The shared memory contains a header with ALL configuration:
@@ -19,21 +23,7 @@ The shared memory contains a header with ALL configuration:
 - Field layout (offsets, types, sizes)
 - Dataclass structure
 
-Readers can open with just the name - no configuration needed!
-
-IMPORTANT: Dataclass Compatibility
------------------------------------
-The dataclass structure is FROZEN at shared memory creation time.
-All processes (writer and readers) MUST use the EXACT SAME dataclass
-definition:
-- Same field names
-- Same field types  
-- Same field order
-- Same type annotations (e.g., str[64], float64[10,10])
-
-If the dataclass changes (fields added/removed/reordered), the header hash
-will mismatch and readers will raise a ValueError. This is intentional to
-prevent silent data corruption.
+Readers can attach with just the name - no DataClass needed!
 
 Header Structure:
     Bytes 0-7:    Hash (lower 8 bytes of SHA256 over header data)
@@ -44,19 +34,21 @@ Header Structure:
 
 Example:
     # Writer process
-    shm = SharedMemory(SensorData, name="sensors", create=True, slots=5)
+    shm = SharedMemory(SensorData, slots=5)
+    pipe.send(shm.name)  # Auto-generated name
     shm.write(temperature=23.5)
     shm.finalize()
     
-    # Reader process (auto-detects slots=5!)
-    shm = SharedMemory(SensorData, name="sensors")
+    # Reader process (DataClass auto-reconstructed!)
+    name = pipe.recv()
+    shm = SharedMemory(name)
     data = shm.read()
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, make_dataclass
 from multiprocessing import shared_memory
 import numpy as np
-from typing import Type, Any, Optional
+from typing import Type, Any, Optional, List, Tuple
 import time
 import re
 import uuid
@@ -80,6 +72,16 @@ def _check_python_version():
         )
 
 _check_python_version()
+
+
+@dataclass
+class SHMInspectionInfo:
+    """Information about shared memory structure (returned by inspect())."""
+    name: str
+    slots: int
+    total_size: int
+    fields: List[Tuple[str, str, int]]  # [(name, type_str, size_bytes), ...]
+
 
 class FieldStatus:
     """
@@ -130,6 +132,7 @@ class FieldStatus:
     def _update(self, status_byte: int):
         """Update status from byte (for object pooling)."""
         self._status = status_byte
+
 
 class ValueWithStatus:
     """Wrapper for field values with status information."""
@@ -207,178 +210,59 @@ class SharedMemory:
     WARNING: Single Writer Only
     ----------------------------
     This implementation is designed for SINGLE-WRITER, MULTIPLE-READER
-    scenarios. Using multiple concurrent writers will cause data corruption
-    because:
-    - No locks are used (lock-free design)
-    - Sequence numbers protect against read-during-write, NOT write-during-write
-    - Field status flags will be inconsistent
-    
-    For multi-writer scenarios, use proper process locks (multiprocessing.Lock)
-    or a different IPC mechanism.
+    scenarios. Using multiple concurrent writers will cause data corruption.
     
     Parameters
     ----------
-    dataclass_type : Type
-        Dataclass type defining the data structure.
-    name : str, optional
-        Shared memory name. If None, generates unique name.
-    slots : int, optional
-        Number of buffer slots. Only used when create=True.
-        Readers auto-detect this from header.
-    create : bool, default=False
-        If True, creates new shared memory. If False, opens existing.
+    dataclass_or_name : Type or str
+        - Type: Create new shared memory (auto-generated name)
+        - str: Attach to existing shared memory
+    slots : int, default=1
+        Number of FIFO slots (CREATE mode only)
+    expected_type : Type, optional
+        Validate structure matches this DataClass (ATTACH mode only)
     
     Examples
     --------
-    Writer:
-        shm = SharedMemory(SensorData, name="sensors", create=True, slots=5)
+    Create (Writer):
+        shm = SharedMemory(SensorData, slots=10)
+        pipe.send(shm.name)  # Send auto-generated name
         shm.write(temperature=23.5)
         shm.finalize()
     
-    Reader (auto-detects slots!):
-        shm = SharedMemory(SensorData, name="sensors")
+    Attach (Reader - auto-reconstructs DataClass!):
+        name = pipe.recv()
+        shm = SharedMemory(name)
         data = shm.read()
+    
+    Attach with validation:
+        shm = SharedMemory(name, expected_type=SensorData)
     """
     
-    def __init__(self, dataclass_type: Type, name: Optional[str] = None, 
-                 slots: Optional[int] = None, create: bool = False):
-        
-        self.dataclass_type = dataclass_type
-        
-        # Generate name if not provided
-        if name is None:
-            name = f"shm_{uuid.uuid4().hex[:8]}"
-        
-        if create:
-            # WRITER: Create with specified configuration
-            if slots is None:
-                slots = 1
-            if slots < 1:
-                raise ValueError("slots must be >= 1")
-            
-            self.slots = slots
-            self.is_fifo = slots > 1
-            
-            # Analyze dataclass structure
-            self._layout = _SharedMemoryLayout(dataclass_type)
-            self._slot_size = self._layout.total_size
-            
-            # Build header
-            header = self._build_header()
-            
-            # FIFO metadata size
-            metadata_size = 24 if self.is_fifo else 0
-            data_size = metadata_size + self._slot_size * slots
-            total_size = len(header) + data_size
-            
-            # Create shared memory
-            self.shm = shared_memory.SharedMemory(
-                name=name,
-                create=True,
-                size=total_size
-            )
-            
-            # Write header
-            self.shm.buf[0:len(header)] = header
-            
-            # Set offsets
-            self._header_size = len(header)
-            self._metadata_offset = self._header_size
-            self._data_offset = self._header_size + metadata_size
-            
-            # Initialize FIFO metadata
-            if self.is_fifo:
-                self._set_fifo_metadata(0, 0, 0)
-            
-            # Initialize all slots
-            for slot_idx in range(slots):
-                self._initialize_slot(slot_idx)
-        
+    def __init__(
+        self, 
+        dataclass_or_name,
+        *,
+        slots: int = 1,
+        expected_type: Optional[Type] = None
+    ):
+        # Detect mode
+        if isinstance(dataclass_or_name, str):
+            # ATTACH mode
+            if slots != 1:
+                raise ValueError(
+                    "Parameter 'slots' not allowed in ATTACH mode.\n"
+                    "Slots are auto-detected from shared memory header."
+                )
+            self._attach_mode(dataclass_or_name, expected_type)
         else:
-            # READER: Auto-detect configuration from header
-
-            # Reject slots parameter for reader (auto-detection only)
-            if slots is not None:
+            # CREATE mode
+            if expected_type is not None:
                 raise ValueError(
-                    "Reader mode does not accept 'slots' parameter.\n"
-                    "The number of slots is auto-detected from the shared memory header.\n"
-                    "Remove the 'slots' argument when opening existing shared memory."
+                    "Parameter 'expected_type' not allowed in CREATE mode.\n"
+                    "expected_type is only for validating existing shared memory."
                 )
-            
-            # Step 1: Read fixed header (24 bytes)
-            shm_temp = shared_memory.SharedMemory(name=name)
-            
-            if shm_temp.size < FIXED_HEADER_SIZE:
-                shm_temp.close()
-                raise ValueError(f"Shared memory too small: {shm_temp.size} bytes")
-            
-            stored_hash = int.from_bytes(shm_temp.buf[0:8], 'little')
-            header_length = int.from_bytes(shm_temp.buf[8:12], 'little')
-            total_length = int.from_bytes(shm_temp.buf[12:20], 'little')
-            slots_from_header = int.from_bytes(shm_temp.buf[20:24], 'little')
-            
-            # Step 2: Read complete header and validate hash
-            if shm_temp.size < header_length:
-                shm_temp.close()
-                raise ValueError(f"Header size mismatch: need {header_length}, have {shm_temp.size}")
-            
-            header_data = bytes(shm_temp.buf[8:header_length])
-            stored_header_hash = self._compute_hash(header_data)
-            
-            # Step 3: Compute hash from OUR dataclass to verify compatibility
-            temp_layout = _SharedMemoryLayout(dataclass_type)
-            our_layout_dict = temp_layout.to_dict()
-            our_layout_pickle = pickle.dumps(our_layout_dict)
-            
-            # Build header data exactly as writer would (using actual header_length and total_length)
-            our_header_data = bytearray()
-            our_header_data.extend(struct.pack('<I', header_length))  # Use actual header length
-            our_header_data.extend(struct.pack('<Q', total_length))   # Use actual total length
-            our_header_data.extend(struct.pack('<I', slots_from_header))
-            our_header_data.extend(our_layout_pickle)
-            
-            our_computed_hash = self._compute_hash(bytes(our_header_data))
-            
-            # Compare: our layout hash vs stored layout hash
-            if stored_header_hash != our_computed_hash:
-                shm_temp.close()
-                raise ValueError(
-                    f"Dataclass structure mismatch!\n"
-                    f"The shared memory was created with a different dataclass definition.\n"
-                    f"Ensure all processes use the EXACT SAME dataclass:\n"
-                    f"  - Same field names and order\n"
-                    f"  - Same types and annotations\n"
-                    f"Expected hash: {our_computed_hash:016x}\n"
-                    f"Found hash:    {stored_header_hash:016x}"
-                )
-            
-            # Step 4: Parse header (hash validated - safe to use stored layout)
-            self.slots = slots_from_header
-            self.slots = slots_from_header
-            self.is_fifo = self.slots > 1
-            
-            # Unpickle layout
-            layout_pickle = bytes(shm_temp.buf[24:header_length])
-            layout_dict = pickle.loads(layout_pickle)
-            self._layout = _SharedMemoryLayout.from_dict(layout_dict, dataclass_type)
-            self._slot_size = self._layout.total_size
-            
-            # Verify total size
-            metadata_size = 24 if self.is_fifo else 0
-            expected_size = header_length + metadata_size + self._slot_size * self.slots
-            
-            if shm_temp.size < expected_size:
-                shm_temp.close()
-                raise ValueError(f"Shared memory size mismatch: need {expected_size}, have {shm_temp.size}")
-            
-            self.shm = shm_temp
-            
-            # Set offsets
-            self._header_size = header_length
-            self._metadata_offset = self._header_size
-            self._data_offset = self._header_size + metadata_size
-        
-        self.name = self.shm.name
+            self._create_mode(dataclass_or_name, slots)
         
         # Current write buffer for staging (FIFO mode)
         self._write_buffer = {}
@@ -389,6 +273,242 @@ class SharedMemory:
         self._field_status_pool = [FieldStatus(0) for _ in range(num_fields)]
         self._value_status_pool = [ValueWithStatus(None, FieldStatus(0)) for _ in range(num_fields)]
         self._read_dict = {}  # Reusable dict for reads
+    
+    def _create_mode(self, dataclass_type: Type, slots: int):
+        """Create new shared memory with auto-generated name."""
+        
+        self.dataclass_type = dataclass_type
+        
+        # AUTO-GENERATE name (no user input!)
+        name = f"shm_{uuid.uuid4().hex[:8]}"
+        
+        # Validate slots
+        if slots < 1:
+            raise ValueError("slots must be >= 1")
+        
+        self.slots = slots
+        self.is_fifo = slots > 1
+        
+        # Analyze dataclass structure
+        self._layout = _SharedMemoryLayout(dataclass_type)
+        self._slot_size = self._layout.total_size
+        
+        # Build header
+        header = self._build_header()
+        
+        # FIFO metadata size
+        metadata_size = 24 if self.is_fifo else 0
+        data_size = metadata_size + self._slot_size * slots
+        total_size = len(header) + data_size
+        
+        # Create shared memory
+        self.shm = shared_memory.SharedMemory(
+            name=name,
+            create=True,
+            size=total_size
+        )
+        
+        # Write header
+        self.shm.buf[0:len(header)] = header
+        
+        # Set offsets
+        self._header_size = len(header)
+        self._metadata_offset = self._header_size
+        self._data_offset = self._header_size + metadata_size
+        
+        # Initialize FIFO metadata
+        if self.is_fifo:
+            self._set_fifo_metadata(0, 0, 0)
+        
+        # Initialize all slots
+        for slot_idx in range(slots):
+            self._initialize_slot(slot_idx)
+        
+        self.name = self.shm.name
+    
+    def _attach_mode(self, name: str, expected_type: Optional[Type]):
+        """Attach to existing shared memory and reconstruct DataClass."""
+        
+        # Step 1: Read fixed header (24 bytes)
+        shm_temp = shared_memory.SharedMemory(name=name)
+        
+        if shm_temp.size < FIXED_HEADER_SIZE:
+            shm_temp.close()
+            raise ValueError(f"Shared memory too small: {shm_temp.size} bytes")
+        
+        stored_hash = int.from_bytes(shm_temp.buf[0:8], 'little')
+        header_length = int.from_bytes(shm_temp.buf[8:12], 'little')
+        total_length = int.from_bytes(shm_temp.buf[12:20], 'little')
+        slots_from_header = int.from_bytes(shm_temp.buf[20:24], 'little')
+        
+        # Step 2: Read complete header and validate hash
+        if shm_temp.size < header_length:
+            shm_temp.close()
+            raise ValueError(f"Header size mismatch: need {header_length}, have {shm_temp.size}")
+        
+        header_data = bytes(shm_temp.buf[8:header_length])
+        stored_header_hash = self._compute_hash(header_data)
+        
+        # Step 3: Validate with expected_type if provided
+        if expected_type is not None:
+            # Compute hash of expected structure
+            temp_layout = _SharedMemoryLayout(expected_type)
+            our_layout_dict = temp_layout.to_dict()
+            our_layout_pickle = pickle.dumps(our_layout_dict)
+            
+            # Build header data exactly as writer would
+            our_header_data = bytearray()
+            our_header_data.extend(struct.pack('<I', header_length))
+            our_header_data.extend(struct.pack('<Q', total_length))
+            our_header_data.extend(struct.pack('<I', slots_from_header))
+            our_header_data.extend(our_layout_pickle)
+            
+            our_computed_hash = self._compute_hash(bytes(our_header_data))
+            
+            # Compare hashes
+            if stored_header_hash != our_computed_hash:
+                shm_temp.close()
+                raise ValueError(
+                    f"Structure mismatch!\n"
+                    f"Expected type: {expected_type.__name__}\n"
+                    f"Shared memory was created with different structure.\n"
+                    f"Expected hash: {our_computed_hash:016x}\n"
+                    f"Found hash:    {stored_header_hash:016x}"
+                )
+        
+        # Step 4: Parse header and reconstruct DataClass
+        self.slots = slots_from_header
+        self.is_fifo = self.slots > 1
+        
+        # Unpickle layout
+        layout_pickle = bytes(shm_temp.buf[24:header_length])
+        layout_dict = pickle.loads(layout_pickle)
+        self._layout = _SharedMemoryLayout.from_dict(layout_dict, None)  # None = auto-reconstruct
+        self._slot_size = self._layout.total_size
+        
+        # Reconstruct DataClass from layout
+        self.dataclass_type = self._reconstruct_dataclass_from_layout(self._layout, name)
+        
+        # Verify total size
+        metadata_size = 24 if self.is_fifo else 0
+        expected_size = header_length + metadata_size + self._slot_size * self.slots
+        
+        if shm_temp.size < expected_size:
+            shm_temp.close()
+            raise ValueError(f"Shared memory size mismatch: need {expected_size}, have {shm_temp.size}")
+        
+        self.shm = shm_temp
+        
+        # Set offsets
+        self._header_size = header_length
+        self._metadata_offset = self._header_size
+        self._data_offset = self._header_size + metadata_size
+        
+        self.name = self.shm.name
+    
+    def _reconstruct_dataclass_from_layout(self, layout: '_SharedMemoryLayout', shm_name: str) -> Type:
+        """
+        Reconstruct a DataClass from layout metadata.
+        
+        Creates a dynamic dataclass with the exact field structure from SHM.
+        This allows readers to attach without importing the original DataClass.
+        """
+        # Build fields list for make_dataclass
+        fields_list = []
+        
+        for field_info in layout.fields:
+            field_name = field_info.name
+            
+            # Reconstruct type annotation
+            if field_info.is_scalar:
+                # Numpy scalar type
+                field_type = field_info.field_type
+                
+            elif field_info.is_string:
+                # String annotation as string (forward reference)
+                field_type = f"str[{field_info.string_max_chars}]"
+                
+            elif field_info.is_array:
+                # Array annotation as string
+                dtype_str = np.dtype(field_info.array_dtype).name
+                shape_str = ','.join(str(s) for s in field_info.array_shape)
+                field_type = f"{dtype_str}[{shape_str}]"
+            
+            # Add field with no default (required field)
+            fields_list.append((field_name, field_type))
+        
+        # Create dynamic dataclass
+        class_name = f"DynamicDataClass_{shm_name.replace('-', '_')}"
+        
+        return make_dataclass(class_name, fields_list)
+    
+    @classmethod
+    def inspect(cls, name: str) -> SHMInspectionInfo:
+        """
+        Inspect shared memory structure without attaching.
+        
+        Parameters
+        ----------
+        name : str
+            Shared memory name
+        
+        Returns
+        -------
+        SHMInspectionInfo
+            Metadata about the shared memory structure
+        
+        Examples
+        --------
+        >>> info = SharedMemory.inspect("shm_a3f8b2c1")
+        >>> print(f"Slots: {info.slots}")
+        >>> for field_name, field_type, field_size in info.fields:
+        ...     print(f"  {field_name}: {field_type} ({field_size} bytes)")
+        """
+        # Open SHM temporarily (read-only)
+        shm_temp = shared_memory.SharedMemory(name=name)
+        
+        try:
+            # Read fixed header
+            if shm_temp.size < FIXED_HEADER_SIZE:
+                raise ValueError(f"Invalid shared memory: too small ({shm_temp.size} bytes)")
+            
+            header_length = int.from_bytes(shm_temp.buf[8:12], 'little')
+            total_length = int.from_bytes(shm_temp.buf[12:20], 'little')
+            slots = int.from_bytes(shm_temp.buf[20:24], 'little')
+            
+            # Read layout
+            layout_pickle = bytes(shm_temp.buf[24:header_length])
+            layout_dict = pickle.loads(layout_pickle)
+            
+            # Extract field information
+            fields_info = []
+            for field_data in layout_dict['fields']:
+                field_name = field_data['name']
+                
+                # Build type string
+                if field_data['is_scalar']:
+                    type_str = field_data['field_type']
+                elif field_data['is_string']:
+                    type_str = f"str[{field_data['string_max_chars']}]"
+                elif field_data['is_array']:
+                    dtype = field_data['array_dtype']
+                    shape = field_data['array_shape']
+                    shape_str = ','.join(str(s) for s in shape)
+                    type_str = f"{dtype}[{shape_str}]"
+                
+                size_bytes = field_data['size']
+                
+                fields_info.append((field_name, type_str, size_bytes))
+            
+            return SHMInspectionInfo(
+                name=name,
+                slots=slots,
+                total_size=total_length,
+                fields=fields_info
+            )
+        
+        finally:
+            shm_temp.close()
     
     def _build_header(self) -> bytes:
         """Build header with hash."""
@@ -416,9 +536,6 @@ class SharedMemory:
         
         # Fill in header length
         struct.pack_into('<I', header_data, 0, header_length)
-        
-        # Total length will be filled by caller
-        # (we don't know data size yet)
         
         # Compute hash over header_data
         hash_value = self._compute_hash(bytes(header_data))
@@ -450,10 +567,6 @@ class SharedMemory:
     
     def finalize(self):
         """Finalize staged write in FIFO mode."""
-        # Performance: Skip runtime check (design assumption: caller knows mode)
-        # if not self.is_fifo:
-        #     raise RuntimeError("finalize() only for FIFO (slots > 1)")
-        
         if not self._write_buffer_dirty:
             return
         
@@ -474,7 +587,7 @@ class SharedMemory:
         
         self._set_fifo_metadata(write_idx, read_idx, count)
         
-        self._write_buffer.clear()  # Performance: Reuse dict instead of new allocation
+        self._write_buffer.clear()
         self._write_buffer_dirty = False
     
     def read(self, timeout: float = 0, latest: bool = False, 
@@ -490,22 +603,10 @@ class SharedMemory:
         reset_modified : bool, default=False
             Clear the 'modified' flag after reading.
             Only supported in single-slot mode (slots=1).
-            Raises ValueError in FIFO mode.
         
         Returns
         -------
         Dataclass instance with ValueWithStatus fields, or None if timeout.
-        
-        Raises
-        ------
-        ValueError
-            If reset_modified=True in FIFO mode (slots > 1).
-        
-        Notes
-        -----
-        In FIFO mode, reset_modified is not supported because multiple
-        readers could consume the same slot, making the modified flag
-        ambiguous (modified for which reader?).
         """
         if reset_modified and self.is_fifo:
             raise ValueError("reset_modified only supported in single-slot mode")
@@ -622,30 +723,28 @@ class SharedMemory:
         self._write_uint64(seq_end_offset, seq)
     
     def _write_scalar(self, offset: int, value: Any, field_type: Type):
-        """Write scalar value."""
-        if field_type == float:
-            np.ndarray(1, dtype=np.float64, buffer=self.shm.buf, offset=offset)[0] = value
-        elif field_type == int:
-            np.ndarray(1, dtype=np.int32, buffer=self.shm.buf, offset=offset)[0] = value
-        elif field_type == bool:
-            self.shm.buf[offset] = 1 if value else 0
+        """Write scalar value (numpy or Python types)."""
+        # Get numpy dtype
+        dtype = np.dtype(field_type)
+        
+        # Write using numpy array view
+        np.ndarray(1, dtype=dtype, buffer=self.shm.buf, offset=offset)[0] = value
     
     def _write_string(self, offset: int, value: str, field_info: '_FieldInfo') -> bool:
         """Write string with UTF-8 encoding, return True if truncated."""
-        max_bytes = field_info.string_max_bytes  # Performance: Use pre-cached value
+        max_bytes = field_info.string_max_bytes
         
-        # Check character truncation FIRST (before encoding)
+        # Check character truncation FIRST
         char_truncated = len(value) > field_info.string_max_chars
         if char_truncated:
-            value = value[:field_info.string_max_chars]  # Truncate to max characters
+            value = value[:field_info.string_max_chars]
         
         encoded = value.encode('utf-8')
         
-        # Check byte truncation (should rarely happen with 4x reserve, safety fallback)
+        # Check byte truncation (safety fallback)
         if len(encoded) > max_bytes:
-            # Truncate to max_bytes, but ensure valid UTF-8 boundary
             encoded = encoded[:max_bytes]
-            # Walk backwards to find valid UTF-8 start
+            # Walk backwards to find valid UTF-8 boundary
             while len(encoded) > 0:
                 try:
                     encoded.decode('utf-8')
@@ -665,7 +764,7 @@ class SharedMemory:
         truncated = value.shape != field_info.array_shape
         
         flat_value = value.flatten()
-        expected_size = field_info.array_flat_size  # Performance: Use pre-cached value
+        expected_size = field_info.array_flat_size
         
         if len(flat_value) > expected_size:
             flat_value = flat_value[:expected_size]
@@ -734,7 +833,7 @@ class SharedMemory:
         seq_begin = self._read_uint64(offset)
         status_offset = offset + 8
         
-        # Performance: Reuse dict and pooled objects instead of allocating new ones
+        # Performance: Reuse dict and pooled objects
         self._read_dict.clear()
         for idx, field_info in enumerate(self._layout.fields):
             field_offset = offset + field_info.offset
@@ -767,7 +866,6 @@ class SharedMemory:
                 self.shm.buf[status_offset + idx] = status_byte
         
         # Check if at least one field is valid (not unwritten)
-        # If all fields are unwritten, return None (no data available yet)
         has_valid_data = any(not wrapper._status.is_unwritten for wrapper in self._read_dict.values())
         if not has_valid_data:
             return None
@@ -775,13 +873,14 @@ class SharedMemory:
         return self.dataclass_type(**self._read_dict)
     
     def _read_scalar(self, offset: int, field_type: Type) -> Any:
-        """Read scalar value."""
-        if field_type == float:
-            return float(np.ndarray(1, dtype=np.float64, buffer=self.shm.buf, offset=offset)[0])
-        elif field_type == int:
-            return int(np.ndarray(1, dtype=np.int32, buffer=self.shm.buf, offset=offset)[0])
-        elif field_type == bool:
-            return bool(self.shm.buf[offset])
+        """Read scalar value (numpy or Python types)."""
+        # Get numpy dtype
+        dtype = np.dtype(field_type)
+        
+        # Read using numpy array view and convert to Python type
+        value = np.ndarray(1, dtype=dtype, buffer=self.shm.buf, offset=offset)[0]
+        
+        return value.item()  # Convert numpy scalar to Python type
     
     def _read_string(self, offset: int, field_info: '_FieldInfo') -> str:
         """Read UTF-8 string."""
@@ -791,7 +890,7 @@ class SharedMemory:
     
     def _read_array(self, offset: int, field_info: '_FieldInfo') -> np.ndarray:
         """Read array."""
-        size = field_info.array_flat_size  # Performance: Use pre-cached value
+        size = field_info.array_flat_size
         flat_array = np.ndarray(
             size,
             dtype=field_info.array_dtype,
@@ -844,29 +943,17 @@ class _SharedMemoryLayout:
         }
     
     @classmethod
-    def from_dict(cls, data: dict, dataclass_type: Type) -> '_SharedMemoryLayout':
-        """Deserialize from dictionary."""
+    def from_dict(cls, data: dict, dataclass_type: Optional[Type]) -> '_SharedMemoryLayout':
+        """Deserialize from dictionary (dataclass_type can be None for auto-reconstruction)."""
         layout = cls.__new__(cls)
-        layout.dataclass_type = dataclass_type
+        layout.dataclass_type = dataclass_type  # Can be None!
         layout.fields = [_FieldInfo.from_dict(f) for f in data['fields']]
         layout.total_size = data['total_size']
         return layout
 
 
 class _FieldInfo:
-    """
-    Information about a dataclass field.
-    
-    Notes
-    -----
-    Arrays are treated as atomic units:
-    - The entire array shares ONE status byte
-    - Modifying any element marks the whole array as modified
-    - Padding with zeros fills to expected shape but is still valid
-    
-    For per-element status tracking, use multiple separate fields or
-    multiple SharedMemory instances.
-    """
+    """Information about a dataclass field."""
     
     def __init__(self, name: str, field_type: Any, default: Any):
         self.name = name
@@ -876,57 +963,108 @@ class _FieldInfo:
         self.is_string = False
         self.is_array = False
         self.string_max_chars = 0
-        self.string_max_bytes = 0  # Vorcachen
+        self.string_max_bytes = 0
         self.array_dtype = None
         self.array_shape = None
-        self.array_flat_size = 0  # Vorcachen
+        self.array_flat_size = 0
         self.size = 0
         self.offset = 0
         
         self._parse_type()
     
     def _parse_type(self):
-        """Determine field properties."""
+        """Determine field properties from type annotation."""
+        
+        # ========================================
+        # 1. NUMPY SCALARS (Primary)
+        # ========================================
+        NUMPY_SCALAR_SIZES = {
+            np.float64: 8, np.float32: 4,
+            np.int64: 8, np.int32: 4, np.int16: 2, np.int8: 1,
+            np.uint64: 8, np.uint32: 4, np.uint16: 2, np.uint8: 1,
+            np.bool_: 1
+        }
+        
+        if self.field_type in NUMPY_SCALAR_SIZES:
+            self.is_scalar = True
+            self.size = NUMPY_SCALAR_SIZES[self.field_type]
+            return
+        
+        # ========================================
+        # 2. PYTHON TYPES (Backward Compatibility)
+        # ========================================
+        PYTHON_TYPE_MAPPING = {
+            float: (np.float64, 8),
+            int: (np.int32, 4),
+            bool: (np.bool_, 1)
+        }
+        
+        if self.field_type in PYTHON_TYPE_MAPPING:
+            mapped_type, size = PYTHON_TYPE_MAPPING[self.field_type]
+            self.field_type = mapped_type  # REMAP to numpy type!
+            self.is_scalar = True
+            self.size = size
+            return
+        
+        # ========================================
+        # 3. STRING ANNOTATIONS
+        # ========================================
         annotation = str(self.field_type)
         
         string_chars = _AnnotationParser.parse_string(annotation)
         if string_chars:
             self.is_string = True
             self.string_max_chars = string_chars
-            self.string_max_bytes = string_chars * 4  # Vorcachen für Performance
+            self.string_max_bytes = string_chars * 4
             self.size = 4 + self.string_max_bytes
             return
         
+        # ========================================
+        # 4. ARRAY ANNOTATIONS
+        # ========================================
         array_info = _AnnotationParser.parse_array(annotation)
         if array_info:
             self.is_array = True
             self.array_dtype, self.array_shape = array_info
-            self.array_flat_size = int(np.prod(self.array_shape))  # Vorcachen für Performance
+            self.array_flat_size = int(np.prod(self.array_shape))
             self.size = self.array_flat_size * np.dtype(self.array_dtype).itemsize
             return
         
-        type_sizes = {float: 8, int: 4, bool: 1}
-        
-        if self.field_type in type_sizes:
-            self.is_scalar = True
-            self.size = type_sizes[self.field_type]
-            return
-        
-        raise ValueError(f"Unsupported type for field '{self.name}': {self.field_type}")
+        # ========================================
+        # 5. UNSUPPORTED
+        # ========================================
+        raise ValueError(
+            f"Unsupported type for field '{self.name}': {self.field_type}\n"
+            f"Supported types:\n"
+            f"  - Numpy scalars: np.float64, np.float32, np.int32, np.uint8, etc.\n"
+            f"  - Python scalars: float, int, bool (mapped to numpy)\n"
+            f"  - Strings: 'str[N]' (e.g., 'str[64]')\n"
+            f"  - Arrays: 'dtype[shape]' (e.g., 'float32[10,20]')"
+        )
     
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
+        # Convert numpy type to string for pickling
+        if self.is_scalar and hasattr(self.field_type, '__name__'):
+            # Numpy type: get the name (e.g., 'float64')
+            type_str = self.field_type.__name__
+        elif self.is_scalar:
+            # Already a string or other
+            type_str = str(self.field_type)
+        else:
+            type_str = str(self.field_type)
+        
         return {
             'name': self.name,
-            'field_type': self.field_type.__name__ if hasattr(self.field_type, '__name__') else str(self.field_type),
+            'field_type': type_str,
             'is_scalar': self.is_scalar,
             'is_string': self.is_string,
             'is_array': self.is_array,
             'string_max_chars': self.string_max_chars,
-            'string_max_bytes': self.string_max_bytes,  # Neu
+            'string_max_bytes': self.string_max_bytes,
             'array_dtype': np.dtype(self.array_dtype).name if self.array_dtype else None,
             'array_shape': self.array_shape,
-            'array_flat_size': self.array_flat_size,  # Neu
+            'array_flat_size': self.array_flat_size,
             'size': self.size,
             'offset': self.offset
         }
@@ -937,26 +1075,37 @@ class _FieldInfo:
         field_info = cls.__new__(cls)
         field_info.name = data['name']
         
-        # Reconstruct field_type safely
-        type_name = data['field_type']
-        type_map = {'float': float, 'int': int, 'bool': bool}
-        field_info.field_type = type_map.get(type_name, str)  # ← GEÄNDERT: Fallback zu str statt eval
+        # Reconstruct field_type
+        type_str = data['field_type']
+        
+        # Map numpy type names back to types
+        NUMPY_TYPE_MAP = {
+            'float64': np.float64, 'float32': np.float32,
+            'int64': np.int64, 'int32': np.int32, 'int16': np.int16, 'int8': np.int8,
+            'uint64': np.uint64, 'uint32': np.uint32, 'uint16': np.uint16, 'uint8': np.uint8,
+            'bool_': np.bool_,
+            # Fallbacks for Python types
+            'float': np.float64,
+            'int': np.int32,
+            'bool': np.bool_
+        }
+        
+        field_info.field_type = NUMPY_TYPE_MAP.get(type_str, str)
         
         field_info.is_scalar = data['is_scalar']
         field_info.is_string = data['is_string']
         field_info.is_array = data['is_array']
         field_info.string_max_chars = data['string_max_chars']
-        field_info.string_max_bytes = data.get('string_max_bytes', data['string_max_chars'] * 4)  # Backwards compatibility
+        field_info.string_max_bytes = data.get('string_max_bytes', data['string_max_chars'] * 4)
         
         if data['array_dtype']:
-            # Parse numpy dtype string safely
             dtype_str = data['array_dtype'].replace('dtype(', '').replace(')', '').strip("'\"")
-            field_info.array_dtype = np.dtype(dtype_str)  # ← numpy.dtype() ist sicher!
+            field_info.array_dtype = np.dtype(dtype_str)
         else:
             field_info.array_dtype = None
         
         field_info.array_shape = data['array_shape']
-        field_info.array_flat_size = data.get('array_flat_size', 0)  # Backwards compatibility
+        field_info.array_flat_size = data.get('array_flat_size', 0)
         if field_info.array_flat_size == 0 and field_info.array_shape:
             field_info.array_flat_size = int(np.prod(field_info.array_shape))
         field_info.size = data['size']

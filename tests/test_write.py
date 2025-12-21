@@ -13,18 +13,11 @@ Tests cover:
 import pytest
 import numpy as np
 from dataclasses import dataclass
-import time
 import multiprocessing
 from multiprocessing import Queue
 import sys
 
 from flexible_shared_memory import SharedMemory
-
-
-@pytest.fixture
-def unique_name():
-    """Generate unique name for each test."""
-    return f"test_shm_{time.time_ns()}"
 
 
 PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spawn"]
@@ -60,11 +53,11 @@ class Array2D:
     matrix: "float64[5,5]" = None
 
 
-# Helper functions at module level
+# Helper functions at module level - ALL use ATTACH mode
 def write_single_float(name: str, value: float, queue: Queue):
     """Write a single float field."""
     try:
-        shm = SharedMemory(ScalarData, name=name)  # Auto-detect
+        shm = SharedMemory(name)  # ATTACH
         shm.write(temperature=value)
         shm.close()
         queue.put(("success", value))
@@ -75,7 +68,7 @@ def write_single_float(name: str, value: float, queue: Queue):
 def write_single_int(name: str, value: int, queue: Queue):
     """Write a single int field."""
     try:
-        shm = SharedMemory(ScalarData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(count=value)
         shm.close()
         queue.put(("success", value))
@@ -86,7 +79,7 @@ def write_single_int(name: str, value: int, queue: Queue):
 def write_single_bool(name: str, value: bool, queue: Queue):
     """Write a single bool field."""
     try:
-        shm = SharedMemory(ScalarData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(active=value)
         shm.close()
         queue.put(("success", value))
@@ -97,7 +90,7 @@ def write_single_bool(name: str, value: bool, queue: Queue):
 def write_multiple_scalars(name: str, temp: float, count: int, active: bool, queue: Queue):
     """Write multiple scalar fields."""
     try:
-        shm = SharedMemory(ScalarData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(temperature=temp, count=count, active=active)
         shm.close()
         queue.put(("success", (temp, count, active)))
@@ -108,7 +101,7 @@ def write_multiple_scalars(name: str, temp: float, count: int, active: bool, que
 def write_simple_string(name: str, msg: str, queue: Queue):
     """Write a simple string."""
     try:
-        shm = SharedMemory(StringData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(message=msg)
         shm.close()
         queue.put(("success", msg))
@@ -119,7 +112,7 @@ def write_simple_string(name: str, msg: str, queue: Queue):
 def write_unicode_string(name: str, text: str, queue: Queue):
     """Write Unicode string."""
     try:
-        shm = SharedMemory(StringData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(message=text)
         shm.close()
         queue.put(("success", text))
@@ -131,7 +124,7 @@ def write_string_overflow(name: str, length: int, queue: Queue):
     """Write string that exceeds limit."""
     try:
         text = "a" * length
-        shm = SharedMemory(StringData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(message=text)
         shm.close()
         queue.put(("success", text))
@@ -143,7 +136,7 @@ def write_simple_array(name: str, queue: Queue):
     """Write a simple array."""
     try:
         arr = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], dtype=np.float32)
-        shm = SharedMemory(ArrayData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(values=arr)
         shm.close()
         queue.put(("success", arr.tolist()))
@@ -155,7 +148,7 @@ def write_array_overflow(name: str, queue: Queue):
     """Write array larger than field."""
     try:
         arr = np.arange(15, dtype=np.float32)
-        shm = SharedMemory(ArrayData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(values=arr)
         shm.close()
         queue.put(("success", arr.tolist()))
@@ -167,7 +160,7 @@ def write_2d_array(name: str, queue: Queue):
     """Write 2D array."""
     try:
         arr = np.arange(25, dtype=np.float64).reshape(5, 5)
-        shm = SharedMemory(Array2D, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(matrix=arr)
         shm.close()
         queue.put(("success", arr.tolist()))
@@ -179,7 +172,7 @@ def write_all_mixed_fields(name: str, queue: Queue):
     """Write all fields of mixed data."""
     try:
         arr = np.ones((5, 5), dtype=np.float64)
-        shm = SharedMemory(MixedData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(
             position=1.5,
             count=42,
@@ -196,7 +189,7 @@ def write_all_mixed_fields(name: str, queue: Queue):
 def write_partial_fields(name: str, queue: Queue):
     """Write only some fields."""
     try:
-        shm = SharedMemory(MixedData, name=name)
+        shm = SharedMemory(name)  # ATTACH
         shm.write(position=1.0, count=10)
         shm.close()
         queue.put(("success", None))
@@ -208,14 +201,15 @@ class TestWriteScalars:
     """Test writing scalar values."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_single_float(self, unique_name, start_method):
+    def test_write_single_float(self, start_method):
         """Test writing a single float field."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_single_float, args=(unique_name, 23.5, queue))
+            proc = ctx.Process(target=write_single_float, args=(name, 23.5, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -232,14 +226,15 @@ class TestWriteScalars:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_single_int(self, unique_name, start_method):
+    def test_write_single_int(self, start_method):
         """Test writing a single int field."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_single_int, args=(unique_name, 42, queue))
+            proc = ctx.Process(target=write_single_int, args=(name, 42, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -256,14 +251,15 @@ class TestWriteScalars:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_single_bool(self, unique_name, start_method):
+    def test_write_single_bool(self, start_method):
         """Test writing a single bool field."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_single_bool, args=(unique_name, True, queue))
+            proc = ctx.Process(target=write_single_bool, args=(name, True, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -280,15 +276,16 @@ class TestWriteScalars:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_multiple_scalars(self, unique_name, start_method):
+    def test_write_multiple_scalars(self, start_method):
         """Test writing multiple scalar fields at once."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
             proc = ctx.Process(target=write_multiple_scalars, 
-                             args=(unique_name, 25.5, 100, True, queue))
+                             args=(name, 25.5, 100, True, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -313,15 +310,16 @@ class TestWriteStrings:
     """Test writing string values."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_simple_string(self, unique_name, start_method):
+    def test_write_simple_string(self, start_method):
         """Test writing a simple ASCII string."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(StringData, name=unique_name, create=True)
+        shm = SharedMemory(StringData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
             proc = ctx.Process(target=write_simple_string, 
-                             args=(unique_name, "Hello World", queue))
+                             args=(name, "Hello World", queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -339,16 +337,17 @@ class TestWriteStrings:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_unicode_string(self, unique_name, start_method):
+    def test_write_unicode_string(self, start_method):
         """Test writing Unicode characters (German umlauts)."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(StringData, name=unique_name, create=True)
+        shm = SharedMemory(StringData)  # CREATE
+        name = shm.name
         
         try:
             # Use safe characters that work across all systems
             text = "Gruss aus Deutschland!"
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_unicode_string, args=(unique_name, text, queue))
+            proc = ctx.Process(target=write_unicode_string, args=(name, text, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -363,16 +362,17 @@ class TestWriteStrings:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_special_characters(self, unique_name, start_method):
+    def test_write_special_characters(self, start_method):
         """Test writing various special ASCII characters."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(StringData, name=unique_name, create=True)
+        shm = SharedMemory(StringData)  # CREATE
+        name = shm.name
         
         try:
             # Special characters that are safe across systems
             text = "Test!@#$%^&*()_+-=[]{}|;:',.<>?"
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_unicode_string, args=(unique_name, text, queue))
+            proc = ctx.Process(target=write_unicode_string, args=(name, text, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -387,14 +387,15 @@ class TestWriteStrings:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_string_overflow(self, unique_name, start_method):
+    def test_write_string_overflow(self, start_method):
         """Test writing string that exceeds limit."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(StringData, name=unique_name, create=True)
+        shm = SharedMemory(StringData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_string_overflow, args=(unique_name, 40, queue))
+            proc = ctx.Process(target=write_string_overflow, args=(name, 40, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -415,14 +416,15 @@ class TestWriteArrays:
     """Test writing NumPy arrays."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_simple_array(self, unique_name, start_method):
+    def test_write_simple_array(self, start_method):
         """Test writing a simple 1D array."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ArrayData, name=unique_name, create=True)
+        shm = SharedMemory(ArrayData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_simple_array, args=(unique_name, queue))
+            proc = ctx.Process(target=write_simple_array, args=(name, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -441,14 +443,15 @@ class TestWriteArrays:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_array_overflow(self, unique_name, start_method):
+    def test_write_array_overflow(self, start_method):
         """Test writing array larger than field size."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ArrayData, name=unique_name, create=True)
+        shm = SharedMemory(ArrayData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_array_overflow, args=(unique_name, queue))
+            proc = ctx.Process(target=write_array_overflow, args=(name, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -464,14 +467,15 @@ class TestWriteArrays:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_2d_array(self, unique_name, start_method):
+    def test_write_2d_array(self, start_method):
         """Test writing 2D array."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(Array2D, name=unique_name, create=True)
+        shm = SharedMemory(Array2D)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_2d_array, args=(unique_name, queue))
+            proc = ctx.Process(target=write_2d_array, args=(name, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -491,14 +495,15 @@ class TestWriteMixed:
     """Test writing mixed field types."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_all_fields(self, unique_name, start_method):
+    def test_write_all_fields(self, start_method):
         """Test writing all fields of different types."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(MixedData, name=unique_name, create=True)
+        shm = SharedMemory(MixedData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_all_mixed_fields, args=(unique_name, queue))
+            proc = ctx.Process(target=write_all_mixed_fields, args=(name, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -523,14 +528,15 @@ class TestWriteMixed:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_partial_fields(self, unique_name, start_method):
+    def test_write_partial_fields(self, start_method):
         """Test writing only some fields."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(MixedData, name=unique_name, create=True)
+        shm = SharedMemory(MixedData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            proc = ctx.Process(target=write_partial_fields, args=(unique_name, queue))
+            proc = ctx.Process(target=write_partial_fields, args=(name, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -551,14 +557,14 @@ class TestWriteMixed:
 class TestWriteEdgeCases:
     """Test edge cases in write operations."""
     
-    def test_array_padding_undersized(self, unique_name):
+    def test_array_padding_undersized(self):
         """Test that undersized arrays are padded correctly."""
         
         @dataclass
         class PaddedArray:
             data: "float64[10]" = None
         
-        shm = SharedMemory(PaddedArray, name=unique_name, create=True)
+        shm = SharedMemory(PaddedArray)  # CREATE
         
         try:
             # Write array with only 5 elements (should be padded to 10)
@@ -579,14 +585,14 @@ class TestWriteEdgeCases:
             shm.close()
             shm.unlink()
     
-    def test_string_utf8_byte_truncation_boundary(self, unique_name):
+    def test_string_utf8_byte_truncation_boundary(self):
         """Test UTF-8 byte boundary handling when truncating."""
         
         @dataclass
         class SmallString:
             msg: "str[3]" = ""  # 3 chars = 12 bytes max
         
-        shm = SharedMemory(SmallString, name=unique_name, create=True)
+        shm = SharedMemory(SmallString)  # CREATE
         
         try:
             # Write exactly at byte boundary with multi-byte chars
@@ -619,9 +625,9 @@ class TestWriteEdgeCases:
 class TestWriteSequenceNumbers:
     """Test sequence number behavior during writes."""
     
-    def test_sequence_increments_on_write(self, unique_name):
+    def test_sequence_increments_on_write(self):
         """Test that sequence numbers increment with each write."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
         
         try:
             slot_offset = shm._get_slot_offset(0)
@@ -647,9 +653,9 @@ class TestWriteSequenceNumbers:
             shm.close()
             shm.unlink()
     
-    def test_sequence_begin_equals_end_after_write(self, unique_name):
+    def test_sequence_begin_equals_end_after_write(self):
         """Test that seq_begin equals seq_end after successful write."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
         
         try:
             slot_offset = shm._get_slot_offset(0)
@@ -679,10 +685,11 @@ class TestWriteSequenceNumbers:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_sequence_consistent_across_processes(self, unique_name, start_method):
+    def test_sequence_consistent_across_processes(self, start_method):
         """Test that sequence numbers work correctly across processes."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
+        name = shm.name
         
         try:
             slot_offset = shm._get_slot_offset(0)
@@ -694,7 +701,7 @@ class TestWriteSequenceNumbers:
             # Write from subprocess
             queue = ctx.Queue()
             proc = ctx.Process(target=write_multiple_scalars, 
-                             args=(unique_name, 1.0, 1, True, queue))
+                             args=(name, 1.0, 1, True, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -712,9 +719,9 @@ class TestWriteSequenceNumbers:
             shm.close()
             shm.unlink()
     
-    def test_partial_write_increments_sequence(self, unique_name):
+    def test_partial_write_increments_sequence(self):
         """Test that writing only some fields still increments sequence."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
         
         try:
             slot_offset = shm._get_slot_offset(0)
@@ -739,9 +746,9 @@ class TestWriteSequenceNumbers:
             shm.close()
             shm.unlink()
     
-    def test_overwrite_updates_sequence(self, unique_name):
+    def test_overwrite_updates_sequence(self):
         """Test that overwriting same field increments sequence."""
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
         
         try:
             slot_offset = shm._get_slot_offset(0)

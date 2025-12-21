@@ -22,12 +22,6 @@ import sys
 from flexible_shared_memory import SharedMemory
 
 
-@pytest.fixture
-def unique_name():
-    """Generate unique name for each test."""
-    return f"test_shm_{time.time_ns()}"
-
-
 PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spawn"]
 
 
@@ -44,12 +38,12 @@ class ComplexData:
     data: "float32[10]" = None
 
 
-# Helper functions
+# Helper functions - ALL use ATTACH mode
 def delayed_write_process(name: str, delay: float, value: float, queue: Queue):
     """Delayed write in separate process."""
     try:
         time.sleep(delay)
-        shm_w = SharedMemory(SimpleData, name=name)  # Auto-detect
+        shm_w = SharedMemory(name)  # ATTACH
         shm_w.write(value=value)
         shm_w.close()
         queue.put(("success", value))
@@ -60,7 +54,7 @@ def delayed_write_process(name: str, delay: float, value: float, queue: Queue):
 def rapid_writer(name: str, iterations: int, queue: Queue):
     """Write rapidly for concurrent read/write test."""
     try:
-        shm_w = SharedMemory(SimpleData, name=name)
+        shm_w = SharedMemory(name)  # ATTACH
         for i in range(iterations):
             shm_w.write(value=float(i), count=i)
             time.sleep(0.001)  # Very short delay
@@ -73,9 +67,9 @@ def rapid_writer(name: str, iterations: int, queue: Queue):
 class TestReadBasics:
     """Test basic read operations."""
     
-    def test_read_after_write(self, unique_name):
+    def test_read_after_write(self):
         """Test reading immediately after write."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             shm.write(value=42.0, count=10)
@@ -88,9 +82,9 @@ class TestReadBasics:
             shm.close()
             shm.unlink()
     
-    def test_read_multiple_times(self, unique_name):
+    def test_read_multiple_times(self):
         """Test reading same data multiple times."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             shm.write(value=123.4, count=5)
@@ -104,9 +98,9 @@ class TestReadBasics:
             shm.close()
             shm.unlink()
     
-    def test_read_after_multiple_writes(self, unique_name):
+    def test_read_after_multiple_writes(self):
         """Test that read gets latest write."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             shm.write(value=1.0)
@@ -123,9 +117,9 @@ class TestReadBasics:
 class TestReadTimeout:
     """Test read timeout behavior."""
     
-    def test_read_timeout_zero_empty(self, unique_name):
+    def test_read_timeout_zero_empty(self):
         """Test non-blocking read returns None when no valid data available."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             # Read from empty/unwritten slot with timeout=0 should return None immediately
@@ -142,9 +136,9 @@ class TestReadTimeout:
             shm.close()
             shm.unlink()
     
-    def test_read_timeout_zero_with_data(self, unique_name):
+    def test_read_timeout_zero_with_data(self):
         """Test non-blocking read returns data immediately when available."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             # Write data first
@@ -166,14 +160,15 @@ class TestReadTimeout:
             shm.close()
             shm.unlink()
     
-    def test_read_blocks_until_data_threading(self, unique_name):
+    def test_read_blocks_until_data_threading(self):
         """Test read waits for valid data (using threading)."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
+        name = shm.name
         
         try:
             def delayed_write():
                 time.sleep(0.2)
-                shm_w = SharedMemory(SimpleData, name=unique_name)
+                shm_w = SharedMemory(name)  # ATTACH
                 shm_w.write(value=99.0)
                 shm_w.close()
             
@@ -199,16 +194,17 @@ class TestReadTimeout:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_read_blocks_until_data_multiprocess(self, unique_name, start_method):
+    def test_read_blocks_until_data_multiprocess(self, start_method):
         """Test read waits for valid data (using multiprocessing)."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
             writer = ctx.Process(
                 target=delayed_write_process,
-                args=(unique_name, 0.2, 99.0, queue)
+                args=(name, 0.2, 99.0, queue)
             )
             writer.start()
             
@@ -237,7 +233,7 @@ class TestReadTimeout:
 class TestReadDataTypes:
     """Test reading different data types."""
     
-    def test_read_scalars(self, unique_name):
+    def test_read_scalars(self):
         """Test reading scalar values."""
         @dataclass
         class ScalarData:
@@ -245,7 +241,7 @@ class TestReadDataTypes:
             i: int = 0
             b: bool = False
         
-        shm = SharedMemory(ScalarData, name=unique_name, create=True)
+        shm = SharedMemory(ScalarData)  # CREATE
         
         try:
             shm.write(f=3.14159, i=-42, b=True)
@@ -258,13 +254,13 @@ class TestReadDataTypes:
             shm.close()
             shm.unlink()
     
-    def test_read_string(self, unique_name):
+    def test_read_string(self):
         """Test reading string with UTF-8."""
         @dataclass
         class StringData:
             msg: "str[64]" = ""
         
-        shm = SharedMemory(StringData, name=unique_name, create=True)
+        shm = SharedMemory(StringData)  # CREATE
         
         try:
             # Use safe UTF-8 characters that work across all systems
@@ -277,13 +273,13 @@ class TestReadDataTypes:
             shm.close()
             shm.unlink()
     
-    def test_read_string_with_umlauts(self, unique_name):
+    def test_read_string_with_umlauts(self):
         """Test reading string with German umlauts."""
         @dataclass
         class StringData:
             msg: "str[64]" = ""
         
-        shm = SharedMemory(StringData, name=unique_name, create=True)
+        shm = SharedMemory(StringData)  # CREATE
         
         try:
             text = "Gruss aus Deutschland"  # Safe German characters
@@ -295,13 +291,13 @@ class TestReadDataTypes:
             shm.close()
             shm.unlink()
     
-    def test_read_array_1d(self, unique_name):
+    def test_read_array_1d(self):
         """Test reading 1D array."""
         @dataclass
         class ArrayData:
             arr: "float64[10]" = None
         
-        shm = SharedMemory(ArrayData, name=unique_name, create=True)
+        shm = SharedMemory(ArrayData)  # CREATE
         
         try:
             arr = np.arange(10, dtype=np.float64) * 0.5
@@ -314,9 +310,9 @@ class TestReadDataTypes:
             shm.close()
             shm.unlink()
     
-    def test_read_mixed_types(self, unique_name):
+    def test_read_mixed_types(self):
         """Test reading dataclass with mixed types."""
-        shm = SharedMemory(ComplexData, name=unique_name, create=True)
+        shm = SharedMemory(ComplexData)  # CREATE
         
         try:
             arr = np.ones(10, dtype=np.float32) * 5.0
@@ -334,9 +330,9 @@ class TestReadDataTypes:
 class TestReadResetModified:
     """Test reset_modified parameter."""
     
-    def test_reset_modified_true(self, unique_name):
+    def test_reset_modified_true(self):
         """Test reset_modified=True clears modified flags."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             shm.write(value=1.0, count=1)
@@ -355,9 +351,9 @@ class TestReadResetModified:
             shm.close()
             shm.unlink()
     
-    def test_reset_modified_false(self, unique_name):
+    def test_reset_modified_false(self):
         """Test reset_modified=False leaves flags unchanged."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             shm.write(value=2.0, count=2)
@@ -374,9 +370,9 @@ class TestReadResetModified:
 class TestSequenceNumberConsistency:
     """Test sequence number consistency protects against read-during-write."""
     
-    def test_sequence_numbers_detect_corruption(self, unique_name):
+    def test_sequence_numbers_detect_corruption(self):
         """Test that sequence numbers detect incomplete writes."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             # Normal write - sequence numbers match
@@ -400,9 +396,9 @@ class TestSequenceNumberConsistency:
             shm.close()
             shm.unlink()
     
-    def test_sequence_numbers_increment(self, unique_name):
+    def test_sequence_numbers_increment(self):
         """Test that sequence numbers increment with each write."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             slot_offset = shm._get_slot_offset(0)
@@ -428,9 +424,9 @@ class TestSequenceNumberConsistency:
             shm.close()
             shm.unlink()
     
-    def test_sequence_begin_equals_end(self, unique_name):
+    def test_sequence_begin_equals_end(self):
         """Test that seq_begin equals seq_end after successful write."""
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
         
         try:
             # Write some data
@@ -454,14 +450,15 @@ class TestSequenceNumberConsistency:
             shm.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_concurrent_read_write_safety(self, unique_name, start_method):
+    def test_concurrent_read_write_safety(self, start_method):
         """Test that reads during writes are safely rejected via sequence numbers."""
         ctx = multiprocessing.get_context(start_method)
-        shm = SharedMemory(SimpleData, name=unique_name, create=True)
+        shm = SharedMemory(SimpleData)  # CREATE
+        name = shm.name
         
         try:
             queue = ctx.Queue()
-            writer = ctx.Process(target=rapid_writer, args=(unique_name, 50, queue))
+            writer = ctx.Process(target=rapid_writer, args=(name, 50, queue))
             writer.start()
             
             # Read rapidly while writer is writing
@@ -494,5 +491,3 @@ class TestSequenceNumberConsistency:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
-

@@ -8,18 +8,11 @@ and handle slots correctly without explicit parameter.
 import pytest
 import numpy as np
 from dataclasses import dataclass
-import time
 import multiprocessing
 from multiprocessing import Queue
 import sys
 
 from flexible_shared_memory import SharedMemory
-
-
-@pytest.fixture
-def unique_name():
-    """Generate unique name for each test."""
-    return f"test_shm_{time.time_ns()}"
 
 
 PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spawn"]
@@ -42,11 +35,11 @@ class ArrayData:
     data: "float32[5]" = None
 
 
-# Helper functions (readers auto-detect!)
+# Helper functions - ALL use ATTACH mode (readers auto-detect!)
 def write_and_finalize_once(name: str, value: float, count: int, queue: Queue):
     """Write once and finalize."""
     try:
-        fifo = SharedMemory(FIFOData, name=name)  # Auto-detects slots!
+        fifo = SharedMemory(name)  # ATTACH - Auto-detects slots!
         fifo.write(value=value, count=count)
         fifo.finalize()
         fifo.close()
@@ -58,7 +51,7 @@ def write_and_finalize_once(name: str, value: float, count: int, queue: Queue):
 def write_sequence(name: str, start: int, count: int, queue: Queue):
     """Write a sequence of values."""
     try:
-        fifo = SharedMemory(FIFOData, name=name)  # Auto-detects!
+        fifo = SharedMemory(name)  # ATTACH - Auto-detects!
         for i in range(start, start + count):
             fifo.write(value=float(i), count=i)
             fifo.finalize()
@@ -71,7 +64,7 @@ def write_sequence(name: str, start: int, count: int, queue: Queue):
 def write_overflow_sequence(name: str, total: int, queue: Queue):
     """Write sequence that overflows buffer."""
     try:
-        fifo = SharedMemory(FIFOData, name=name)
+        fifo = SharedMemory(name)  # ATTACH
         for i in range(total):
             fifo.write(value=float(i))
             fifo.finalize()
@@ -84,7 +77,7 @@ def write_overflow_sequence(name: str, total: int, queue: Queue):
 def write_mixed_sequence(name: str, messages: list, queue: Queue):
     """Write sequence with mixed types."""
     try:
-        fifo = SharedMemory(MixedData, name=name)
+        fifo = SharedMemory(name)  # ATTACH
         for i, msg in enumerate(messages):
             fifo.write(position=float(i), name=msg)
             fifo.finalize()
@@ -97,7 +90,7 @@ def write_mixed_sequence(name: str, messages: list, queue: Queue):
 def write_array_sequence(name: str, count: int, queue: Queue):
     """Write sequence with arrays."""
     try:
-        fifo = SharedMemory(ArrayData, name=name)
+        fifo = SharedMemory(name)  # ATTACH
         for i in range(count):
             arr = np.ones(5, dtype=np.float32) * i
             fifo.write(data=arr)
@@ -112,9 +105,9 @@ class TestFIFOBasics:
     """Test basic FIFO operations."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_create_fifo(self, unique_name, start_method):
+    def test_create_fifo(self, start_method):
         """Test creating FIFO."""
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=5)
+        fifo = SharedMemory(FIFOData, slots=5)  # CREATE FIFO
         
         try:
             assert fifo.is_fifo
@@ -124,15 +117,16 @@ class TestFIFOBasics:
             fifo.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_write_and_finalize(self, unique_name, start_method):
+    def test_write_and_finalize(self, start_method):
         """Test write and finalize from subprocess."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=5)
+        fifo = SharedMemory(FIFOData, slots=5)  # CREATE FIFO
+        name = fifo.name
         
         try:
             queue = ctx.Queue()
             proc = ctx.Process(target=write_and_finalize_once, 
-                             args=(unique_name, 1.0, 1, queue))
+                             args=(name, 1.0, 1, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -148,9 +142,9 @@ class TestFIFOBasics:
             fifo.unlink()
 
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_read_empty_fifo_timeout(self, unique_name, start_method):
+    def test_read_empty_fifo_timeout(self, start_method):
         """Test reading from empty FIFO returns None after timeout."""
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=5)
+        fifo = SharedMemory(FIFOData, slots=5)  # CREATE FIFO
         
         try:
             # Read from empty FIFO with timeout
@@ -178,15 +172,16 @@ class TestFIFOOrdering:
     """Test FIFO read ordering."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_read_in_order(self, unique_name, start_method):
+    def test_read_in_order(self, start_method):
         """Test reading data in FIFO order."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=5)
+        fifo = SharedMemory(FIFOData, slots=5)  # CREATE FIFO
+        name = fifo.name
         
         try:
             queue = ctx.Queue()
             proc = ctx.Process(target=write_sequence, 
-                             args=(unique_name, 0, 3, queue))
+                             args=(name, 0, 3, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -204,15 +199,16 @@ class TestFIFOOrdering:
             fifo.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_read_latest_skips_old(self, unique_name, start_method):
+    def test_read_latest_skips_old(self, start_method):
         """Test latest=True skips to newest."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=5)
+        fifo = SharedMemory(FIFOData, slots=5)  # CREATE FIFO
+        name = fifo.name
         
         try:
             queue = ctx.Queue()
             proc = ctx.Process(target=write_sequence, 
-                             args=(unique_name, 0, 5, queue))
+                             args=(name, 0, 5, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -232,16 +228,17 @@ class TestFIFOOverflow:
     """Test FIFO overflow behavior."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_overflow_overwrites_oldest(self, unique_name, start_method):
+    def test_overflow_overwrites_oldest(self, start_method):
         """Test FIFO overwrites oldest when full."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=3)
+        fifo = SharedMemory(FIFOData, slots=3)  # CREATE FIFO
+        name = fifo.name
         
         try:
             # Write 5 items into 3-slot FIFO
             queue = ctx.Queue()
             proc = ctx.Process(target=write_overflow_sequence, 
-                             args=(unique_name, 5, queue))
+                             args=(name, 5, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -267,15 +264,16 @@ class TestFIFOOverflow:
             fifo.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_continuous_overflow(self, unique_name, start_method):
+    def test_continuous_overflow(self, start_method):
         """Test continuous overflow."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=3)
+        fifo = SharedMemory(FIFOData, slots=3)  # CREATE FIFO
+        name = fifo.name
         
         try:
             queue = ctx.Queue()
             proc = ctx.Process(target=write_overflow_sequence, 
-                             args=(unique_name, 10, queue))
+                             args=(name, 10, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -292,16 +290,17 @@ class TestFIFOOverflow:
             fifo.unlink()
 
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_overflow_flag_set(self, unique_name, start_method):
+    def test_overflow_flag_set(self, start_method):
         """Test that overflow flag is set when FIFO overflows."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=3)
+        fifo = SharedMemory(FIFOData, slots=3)  # CREATE FIFO
+        name = fifo.name
         
         try:
             # Write 5 items into 3-slot FIFO (causes overflow)
             queue = ctx.Queue()
             proc = ctx.Process(target=write_overflow_sequence, 
-                             args=(unique_name, 5, queue))
+                             args=(name, 5, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -324,9 +323,9 @@ class TestFIFOOverflow:
             fifo.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_overflow_flag_details(self, unique_name, start_method):
+    def test_overflow_flag_details(self, start_method):
         """Test overflow flag on specific fields."""
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=2)
+        fifo = SharedMemory(FIFOData, slots=2)  # CREATE FIFO
         
         try:
             # Write 4 items to 2-slot FIFO
@@ -357,15 +356,16 @@ class TestFIFOSlotCounts:
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     @pytest.mark.parametrize("num_slots", [2, 5, 10])
-    def test_fifo_various_slots(self, unique_name, start_method, num_slots):
+    def test_fifo_various_slots(self, start_method, num_slots):
         """Test FIFO with various slot counts."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=num_slots)
+        fifo = SharedMemory(FIFOData, slots=num_slots)  # CREATE FIFO
+        name = fifo.name
         
         try:
             queue = ctx.Queue()
             proc = ctx.Process(target=write_sequence, 
-                             args=(unique_name, 0, num_slots, queue))
+                             args=(name, 0, num_slots, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -386,16 +386,17 @@ class TestFIFOMixedTypes:
     """Test FIFO with mixed types."""
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_fifo_with_strings(self, unique_name, start_method):
+    def test_fifo_with_strings(self, start_method):
         """Test FIFO with strings."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(MixedData, name=unique_name, create=True, slots=3)
+        fifo = SharedMemory(MixedData, slots=3)  # CREATE FIFO
+        name = fifo.name
         
         try:
             messages = ["first", "second", "third"]
             queue = ctx.Queue()
             proc = ctx.Process(target=write_mixed_sequence, 
-                             args=(unique_name, messages, queue))
+                             args=(name, messages, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -412,15 +413,16 @@ class TestFIFOMixedTypes:
             fifo.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_fifo_with_arrays(self, unique_name, start_method):
+    def test_fifo_with_arrays(self, start_method):
         """Test FIFO with arrays."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(ArrayData, name=unique_name, create=True, slots=3)
+        fifo = SharedMemory(ArrayData, slots=3)  # CREATE FIFO
+        name = fifo.name
         
         try:
             queue = ctx.Queue()
             proc = ctx.Process(target=write_array_sequence, 
-                             args=(unique_name, 3, queue))
+                             args=(name, 3, queue))
             proc.start()
             proc.join(timeout=2.0)
             
@@ -440,9 +442,9 @@ class TestFIFOMixedTypes:
 class TestFIFORestrictions:
     """Test FIFO mode restrictions."""
     
-    def test_reset_modified_not_allowed_in_fifo(self, unique_name):
+    def test_reset_modified_not_allowed_in_fifo(self):
         """Test that reset_modified raises error in FIFO mode."""
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=3)
+        fifo = SharedMemory(FIFOData, slots=3)  # CREATE FIFO
         
         try:
             # Write some data
@@ -462,10 +464,10 @@ class TestFIFORestrictions:
             fifo.unlink()
     
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
-    def test_finalize_required_in_fifo(self, unique_name, start_method):
+    def test_finalize_required_in_fifo(self, start_method):
         """Test that write without finalize doesn't publish in FIFO mode."""
         ctx = multiprocessing.get_context(start_method)
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=3)
+        fifo = SharedMemory(FIFOData, slots=3)  # CREATE FIFO
         
         try:
             # Write WITHOUT finalize
@@ -487,9 +489,9 @@ class TestFIFORestrictions:
             fifo.close()
             fifo.unlink()
 
-    def test_finalize_when_not_dirty(self, unique_name):
+    def test_finalize_when_not_dirty(self):
         """Test that finalize() returns early when buffer not dirty."""
-        fifo = SharedMemory(FIFOData, name=unique_name, create=True, slots=3)
+        fifo = SharedMemory(FIFOData, slots=3)  # CREATE FIFO
         
         try:
             # Call finalize without writing - should return early
@@ -510,10 +512,10 @@ class TestFIFORestrictions:
             fifo.close()
             fifo.unlink()
     
-    def test_fifo_metadata_on_single_slot(self, unique_name):
+    def test_fifo_metadata_on_single_slot(self):
         """Test that FIFO metadata functions handle single-slot mode."""
         # This tests the guards in _get_fifo_metadata and _set_fifo_metadata
-        single = SharedMemory(FIFOData, name=unique_name, create=True, slots=1)
+        single = SharedMemory(FIFOData, slots=1)  # CREATE single-slot
         
         try:
             # These should return (0, 0, 0) for single-slot

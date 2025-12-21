@@ -27,8 +27,8 @@ PROCESS_START_METHODS = ["fork", "spawn"] if sys.platform != "win32" else ["spaw
 def reader_auto_detect(name: str, queue: Queue):
     """Reader that auto-detects ALL configuration."""
     try:
-        # NO parameters except name and dataclass!
-        shm = SharedMemory(AutoDetectData, name=name)
+        # NO parameters except name - DataClass is auto-reconstructed!
+        shm = SharedMemory(name)  # ATTACH
         
         # What did it detect?
         result = {
@@ -61,10 +61,10 @@ class TestReaderAutoDetect:
     def test_reader_detects_slots_automatically(self, start_method, num_slots):
         """Reader auto-detects slots count from header."""
         ctx = multiprocessing.get_context(start_method)
-        name = f"test_autodetect_{start_method}_{num_slots}"
         
         # Writer creates with specific slots
-        shm = SharedMemory(AutoDetectData, name=name, create=True, slots=num_slots)
+        shm = SharedMemory(AutoDetectData, slots=num_slots)  # CREATE
+        name = shm.name  # Get generated name
         
         try:
             # Write some data
@@ -74,7 +74,7 @@ class TestReaderAutoDetect:
                 shm.write(value=42.0, count=1, message="test")
                 shm.finalize()
             
-            # Reader opens WITHOUT specifying slots
+            # Reader opens WITHOUT specifying anything
             queue = ctx.Queue()
             proc = ctx.Process(target=reader_auto_detect, args=(name, queue))
             proc.start()
@@ -106,9 +106,9 @@ class TestReaderAutoDetect:
     def test_reader_detects_field_layout(self, start_method):
         """Reader auto-detects field layout."""
         ctx = multiprocessing.get_context(start_method)
-        name = f"test_layout_{start_method}"
         
-        shm = SharedMemory(AutoDetectData, name=name, create=True)
+        shm = SharedMemory(AutoDetectData)  # CREATE
+        name = shm.name
         
         try:
             shm.write(value=12.34, count=99, message="hello")
@@ -137,10 +137,10 @@ class TestReaderAutoDetect:
     def test_multiple_readers_same_config(self, start_method):
         """Multiple readers all auto-detect same configuration."""
         ctx = multiprocessing.get_context(start_method)
-        name = f"test_multi_reader_{start_method}"
         
         # Writer with FIFO
-        shm = SharedMemory(AutoDetectData, name=name, create=True, slots=5)
+        shm = SharedMemory(AutoDetectData, slots=5)  # CREATE
+        name = shm.name
         
         try:
             shm.write(value=1.0, count=1)
@@ -181,7 +181,6 @@ class TestHeaderValidation:
     @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
     def test_wrong_dataclass_detected(self, start_method):
         """Reader with different dataclass fails hash validation."""
-        name = f"test_wrong_dataclass_{start_method}"
         
         @dataclass
         class WrongDataclass:
@@ -189,14 +188,15 @@ class TestHeaderValidation:
             different: float = 0.0
         
         # Create shared memory with AutoDetectData
-        shm = SharedMemory(AutoDetectData, name=name, create=True)
+        shm = SharedMemory(AutoDetectData)  # CREATE
+        name = shm.name
         
         try:
             shm.write(value=1.0)
             
-            # Try to open with wrong dataclass - should fail hash check
-            with pytest.raises(ValueError, match="Dataclass structure mismatch"):
-                SharedMemory(WrongDataclass, name=name)
+            # Try to validate with wrong dataclass - should fail hash check
+            with pytest.raises(ValueError, match="Structure mismatch"):
+                SharedMemory(name, expected_type=WrongDataclass)  # ATTACH with validation
         
         finally:
             shm.close()
@@ -204,20 +204,20 @@ class TestHeaderValidation:
     
     def test_reader_with_slots_parameter_rejected(self):
         """Reader cannot specify slots parameter (auto-detection only)."""
-        name = f"test_slots_rejected"
         
         # Create shared memory
-        shm = SharedMemory(AutoDetectData, name=name, create=True, slots=5)
+        shm = SharedMemory(AutoDetectData, slots=5)  # CREATE
+        name = shm.name
         
         try:
             shm.write(value=1.0)
             
-            # Try to open reader WITH slots parameter - should fail
-            with pytest.raises(ValueError, match="Reader mode does not accept 'slots' parameter"):
-                SharedMemory(AutoDetectData, name=name, slots=5)
+            # Try to attach WITH slots parameter - should fail
+            with pytest.raises(ValueError, match="not allowed in ATTACH mode"):
+                SharedMemory(name, slots=5)  # ATTACH - cannot specify slots!
             
             # Opening without slots should work
-            shm_reader = SharedMemory(AutoDetectData, name=name)
+            shm_reader = SharedMemory(name)  # ATTACH - auto-detects
             assert shm_reader.slots == 5  # Auto-detected
             shm_reader.close()
         
