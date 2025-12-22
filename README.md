@@ -45,8 +45,11 @@ class SensorData:
 ### Writer Process
 
 ```python
-# Create shared memory
+# Create shared memory (name is auto-generated)
 shm = SharedMemory(SensorData)
+
+# The auto-generated name is available via shm.name
+print(f"Created shared memory: {shm.name}")  # e.g., "shm_a3f8b2c1"
 
 # Write data
 shm.write(
@@ -64,8 +67,12 @@ shm.unlink()
 ### Reader Process
 
 ```python
-# Connect to existing shared memory (auto-detects all configuration from header)
-shm = SharedMemory(SensorData)
+# Connect to existing shared memory by name
+# (DataClass is auto-reconstructed from header!)
+shm = SharedMemory("shm_a3f8b2c1")
+
+# Optional: Validate structure matches expected type
+shm = SharedMemory("shm_a3f8b2c1", expected_type=SensorData)
 
 # Read data with status
 data = shm.read(timeout=1.0)
@@ -126,16 +133,18 @@ if pos.modified:        # Changed since last slot/read
 For buffered communication with multiple slots:
 
 ```python
-# Writer: Create FIFO with 10 slots
+# Writer: Create FIFO with 10 slots (name auto-generated)
 fifo = SharedMemory(SensorData, slots=10)
+pipe.send(fifo.name)  # Send name to reader
 
 # Writer: Stage and commit
 fifo.write(temperature=23.5)
 fifo.write(pressure=1013.0)
 fifo.finalize()  # Atomic commit
 
-# Reader: Auto-detects slots from header (no slots parameter needed!)
-reader = SharedMemory(SensorData, name="buffer")
+# Reader: Attach by name (slots auto-detected from header)
+name = pipe.recv()
+reader = SharedMemory(name)
 
 # Reader: Read oldest or skip to latest
 data = reader.read(timeout=1.0, latest=False)  # FIFO order
@@ -191,6 +200,39 @@ img = data.image
 arr = np.array(img)  # Magic conversion
 arr = img.value      # Explicit access
 ```
+
+### Inspecting Shared Memory
+
+Inspect shared memory structure without attaching:
+```python
+# Inspect without creating SharedMemory instance
+info = SharedMemory.inspect("shm_a3f8b2c1")
+
+print(f"Name: {info.name}")
+print(f"Slots: {info.slots}")
+print(f"Total size: {info.total_size} bytes")
+print("\nFields:")
+for field_name, field_type, field_size in info.fields:
+    print(f"  {field_name}: {field_type} ({field_size} bytes)")
+```
+
+Output:
+```
+Name: shm_a3f8b2c1
+Slots: 1
+Total size: 128 bytes
+
+Fields:
+  temperature: float64 (8 bytes)
+  pressure: float64 (8 bytes)
+  timestamp: float64 (8 bytes)
+  status_msg: str[32] (132 bytes)
+```
+
+This is useful for:
+- Debugging shared memory structure
+- Validating configuration before attaching
+- Building monitoring tools
 
 ## Requirements
 
