@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2024-12-22
+
+### Fixed
+- **CRITICAL: Lock-free correctness bug in sequence number checking**
+  - Reader now reads `seq_end` first, then data, then `seq_begin` (reverse order)
+  - Previous implementation could read inconsistent data during concurrent writes
+  - This bug could cause race conditions in high-frequency write scenarios
+  - All users should update immediately to this version
+
+### Technical Details
+The two-marker sequence number approach (seq_begin, seq_end) is correct, but requires reading in reverse order:
+1. Read seq_end (at end of slot)
+2. Read all field data
+3. Read seq_begin (at start of slot)
+4. Compare: if seq_begin == seq_end → data is consistent
+
+This ensures that if the writer was active during read, the sequence numbers will not match.
+
 
 ## [0.3.0] - 2024-12-22
 

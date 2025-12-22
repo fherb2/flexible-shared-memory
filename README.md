@@ -1,4 +1,5 @@
-# Flexible Shared Memory
+Flexible Shared Memory
+Somwhere unpickled between multiprocessing Shared Memory and -Queue
 
 [![Tests](https://github.com/fherb2/flexible-shared-memory/actions/workflows/test.yml/badge.svg)](https://github.com/fherb2/flexible-shared-memory/actions)
 
@@ -106,6 +107,7 @@ shm.close()
 ## Field Status Tracking
 
 Each field provides status information:
+
 `````python
 data = shm.read()
 pos = data.position
@@ -126,7 +128,7 @@ if pos.modified:        # Changed since last slot/read
     print("Position updated!")
 `````
 
- **Important** : A field is only `valid` if it contains the complete, exact data from the source. Truncated data (e.g., incomplete array coefficients) may be completely unusable and should be treated as an error condition.
+**Important** : A field is only `valid` if it contains the complete, exact data from the source. Truncated data (e.g., incomplete array coefficients) may be completely unusable and should be treated as an error condition.
 
 ## FIFO Mode
 
@@ -204,6 +206,7 @@ arr = img.value      # Explicit access
 ### Inspecting Shared Memory
 
 Inspect shared memory structure without attaching:
+
 ```python
 # Inspect without creating SharedMemory instance
 info = SharedMemory.inspect("shm_a3f8b2c1")
@@ -217,6 +220,7 @@ for field_name, field_type, field_size in info.fields:
 ```
 
 Output:
+
 ```
 Name: shm_a3f8b2c1
 Slots: 1
@@ -230,6 +234,7 @@ Fields:
 ```
 
 This is useful for:
+
 - Debugging shared memory structure
 - Validating configuration before attaching
 - Building monitoring tools

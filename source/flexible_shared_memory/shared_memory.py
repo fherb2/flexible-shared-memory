@@ -830,7 +830,10 @@ class SharedMemory:
         """Read from slot with sequence check."""
         offset = self._get_slot_offset(slot_idx)
         
-        seq_begin = self._read_uint64(offset)
+        # CRITICAL: Read seq_end FIRST for lock-free correctness!
+        seq_end_offset = offset + self._slot_size - 8
+        seq_end = self._read_uint64(seq_end_offset)  # ✅ ZUERST seq_end
+        
         status_offset = offset + 8
         
         # Performance: Reuse dict and pooled objects
@@ -853,8 +856,8 @@ class SharedMemory:
             wrapper._update(value, status_obj)
             self._read_dict[field_info.name] = wrapper
         
-        seq_end_offset = offset + self._slot_size - 8
-        seq_end = self._read_uint64(seq_end_offset)
+        # Read seq_begin LAST for lock-free correctness!
+        seq_begin = self._read_uint64(offset)  # ✅ DANN seq_begin
         
         if seq_begin != seq_end:
             return None
@@ -871,6 +874,7 @@ class SharedMemory:
             return None
         
         return self.dataclass_type(**self._read_dict)
+
     
     def _read_scalar(self, offset: int, field_type: Type) -> Any:
         """Read scalar value (numpy or Python types)."""
