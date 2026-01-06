@@ -442,23 +442,24 @@ class TestFIFOMixedTypes:
 class TestFIFORestrictions:
     """Test FIFO mode restrictions."""
     
-    def test_reset_modified_not_allowed_in_fifo(self):
-        """Test that reset_modified raises error in FIFO mode."""
+    def test_reset_modified_ignored_in_fifo(self):
+        """Test that reset_modified parameter is ignored in FIFO mode (modified flags are never reset)."""
         fifo = SharedMemory(FIFOData, slots=3)  # CREATE FIFO
         
         try:
-            # Write some data
-            fifo.write(value=1.0, count=1)
+            # Write data with both fields
+            fifo.write(value=1.0, count=10)
             fifo.finalize()
             
-            # Try to read with reset_modified - should fail
-            with pytest.raises(ValueError, match="reset_modified only supported in single-slot mode"):
-                fifo.read(timeout=1.0, reset_modified=True)
-            
-            # Normal read should work
-            data = fifo.read(timeout=1.0, reset_modified=False)
+            # Read with reset_modified=True (should be ignored)
+            data = fifo.read(timeout=1.0, reset_modified=True)
             assert data is not None
-            assert abs(data.value.value - 1.0) < 1e-10
+            assert data.value.modified, "Modified flag should be set"
+            assert data.count.modified, "Modified flag should be set"
+            
+            # In FIFO mode, each read consumes a slot, so we can't test
+            # "reading the same slot again" like in single-slot mode.
+            # But we've verified that no error is raised.
         finally:
             fifo.close()
             fifo.unlink()

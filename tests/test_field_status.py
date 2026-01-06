@@ -106,6 +106,22 @@ def write_mixed_truncated(name: str, queue: Queue):
     except Exception as e:
         queue.put(("error", str(e)))
 
+def write_fifo_partial(name: str, queue: Queue):
+    """Write partial data in FIFO mode - test unwritten behavior."""
+    try:
+        shm = SharedMemory(name)  # ATTACH
+        # First finalize: both fields
+        shm.write(value=1.0, count=10)
+        shm.finalize()
+        
+        # Second finalize: only value, count should become UNWRITTEN
+        shm.write(value=2.0)
+        shm.finalize()
+        
+        shm.close()
+        queue.put(("success", None))
+    except Exception as e:
+        queue.put(("error", str(e)))
 
 class TestValidFlag:
     """Test the valid flag behavior."""
@@ -362,6 +378,49 @@ class TestTruncatedFlag:
             shm.close()
             shm.unlink()
 
+
+class TestFIFOUnwrittenBehavior:
+    """Test FIFO-specific unwritten flag behavior."""
+    
+    @pytest.mark.parametrize("start_method", PROCESS_START_METHODS)
+    def test_fifo_unwritten_on_partial_write(self, start_method):
+        """Test that fields not written in finalize() become UNWRITTEN in FIFO mode."""
+        ctx = multiprocessing.get_context(start_method)
+        shm = SharedMemory(SimpleData, slots=3)  # FIFO with 3 slots
+        name = shm.name
+        
+        try:
+            queue = ctx.Queue()
+            proc = ctx.Process(target=write_fifo_partial, args=(name, queue))
+            proc.start()
+            proc.join(timeout=2.0)
+            
+            status, result = queue.get(timeout=1.0)
+            assert status == "success", f"Writer failed: {result}"
+            
+            # Read first entry (value=1.0, count=10)
+            data1 = shm.read(timeout=0)
+            assert data1.value.value == 1.0
+            assert data1.count.value == 10
+            assert not data1.value.unwritten
+            assert not data1.count.unwritten
+            assert data1.value.valid
+            assert data1.count.valid
+            
+            # Read second entry (value=2.0, count=UNWRITTEN!)
+            data2 = shm.read(timeout=0)
+            assert data2.value.value == 2.0
+            assert not data2.value.unwritten, "value should be written"
+            assert data2.value.valid, "value should be valid"
+            
+            # THIS IS THE CRITICAL TEST:
+            assert data2.count.unwritten, "count should be UNWRITTEN (not in finalize)"
+            assert not data2.count.valid, "count should NOT be valid"
+            
+        finally:
+            shm.close()
+            shm.unlink()
+            
 
 class TestFieldStatusClass:
     """Test FieldStatus class directly."""

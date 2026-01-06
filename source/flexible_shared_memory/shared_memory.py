@@ -324,7 +324,7 @@ class SharedMemory:
         for slot_idx in range(slots):
             self._initialize_slot(slot_idx)
         
-        self.name = self.shm.name
+        self.name = self.shm.name.lstrip('/')  # this "/" could be given in Linux
     
     def _attach_mode(self, name: str, expected_type: Optional[Type]):
         """Attach to existing shared memory and reconstruct DataClass."""
@@ -404,7 +404,7 @@ class SharedMemory:
         self._metadata_offset = self._header_size
         self._data_offset = self._header_size + metadata_size
         
-        self.name = self.shm.name
+        self.name = self.shm.name.lstrip('/')  # this "/" could be given in Linux
     
     def _reconstruct_dataclass_from_layout(self, layout: '_SharedMemoryLayout', shm_name: str) -> Type:
         """
@@ -591,26 +591,24 @@ class SharedMemory:
         self._write_buffer_dirty = False
     
     def read(self, timeout: float = 0, latest: bool = False, 
-            reset_modified: bool = False) -> Optional[Any]:
+            reset_modified: bool = True) -> Optional[Any]:
         """Read data from shared memory.
         
         Parameters
-        ----------
+        ---------- 
         timeout : float, default=0
             Maximum time to wait for data in seconds. 0 = no wait.
         latest : bool, default=False
             In FIFO mode, skip to most recent data.
-        reset_modified : bool, default=False
+        reset_modified : bool, default=True
             Clear the 'modified' flag after reading.
-            Only supported in single-slot mode (slots=1).
+            Automatically set to False in FIFO mode (parameter is ignored).
         
         Returns
         -------
         Dataclass instance with ValueWithStatus fields, or None if timeout.
         """
-        if reset_modified and self.is_fifo:
-            raise ValueError("reset_modified only supported in single-slot mode")
-        
+        # In FIFO mode, reset_modified is always False (parameter ignored)
         if self.is_fifo:
             return self._read_fifo(timeout, latest)
         else:
@@ -714,10 +712,15 @@ class SharedMemory:
                     status &= ~FieldStatus.MASK_OVERFLOW
                 
                 self.shm.buf[status_offset + idx] = status
+
             else:
-                status = self.shm.buf[status_offset + idx]
-                status &= ~FieldStatus.MASK_MODIFIED
-                self.shm.buf[status_offset + idx] = status
+                # FIFO: MODIFIED löschen (zeigt "nicht in diesem finalize")
+                # Single-Slot: Nichts tun (akkumulativ)
+                if self.is_fifo:
+                    status = self.shm.buf[status_offset + idx]
+                    status &= ~FieldStatus.MASK_MODIFIED
+                    status |= FieldStatus.MASK_UNWRITTEN
+                    self.shm.buf[status_offset + idx] = status
         
         seq_end_offset = offset + self._slot_size - 8
         self._write_uint64(seq_end_offset, seq)
@@ -999,7 +1002,7 @@ class _FieldInfo:
         # ========================================
         PYTHON_TYPE_MAPPING = {
             float: (np.float64, 8),
-            int: (np.int32, 4),
+            int: (np.int64, 8),
             bool: (np.bool_, 1)
         }
         
