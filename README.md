@@ -1,5 +1,5 @@
 Flexible Shared Memory
-Somwhere unpickled between multiprocessing Shared Memory and -Queue
+Somewhere between multiprocessing Shared Memory and -Queue
 
 [![Tests](https://github.com/fherb2/flexible-shared-memory/actions/workflows/test.yml/badge.svg)](https://github.com/fherb2/flexible-shared-memory/actions)
 
@@ -14,6 +14,10 @@ A high-performance, lock-free shared memory system for inter-process communicati
 * **UTF-8 strings** : Full Unicode support with character-count based limits
 * **Single-slot & FIFO modes** : Choose between minimal latency or buffered communication
 * **Pythonic API** : Intuitive access to values and status flags
+
+## Project State
+
+**Although all tests have been passed, tough everyday use has shown that the module is not yet error-free. In its current state, messages can still be lost.**
 
 ## Installation
 
